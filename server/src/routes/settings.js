@@ -42,6 +42,8 @@ const visibleRepIdsSchema = z
 const EDITABLE = {
   // global rep visibility scope
   visible_rep_ids: visibleRepIdsSchema,
+  // ...and whether rows with no salesperson at all are shown (default true)
+  show_unattributed: z.coerce.boolean(),
   // phase 1 — Zoho backfill window (0 = every invoice, however old)
   line_item_backfill_months: z.coerce.number().int().min(0).max(120),
   // phase 3 — rule windows

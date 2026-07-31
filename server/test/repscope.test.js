@@ -69,11 +69,17 @@ function resetDb() {
   db.exec("DELETE FROM sqlite_sequence WHERE name IN ('cheques','focus_plans','targets','brands','brand_rules')");
   db.exec('PRAGMA foreign_keys = ON');
   setScope(null);
+  setShowUnattributed(true);
 }
 
 /** Write the setting the way the settings route does. */
 function setScope(ids) {
   config.setSetting(attribution.VISIBLE_REPS_SETTING, ids);
+}
+
+/** show_unattributed — the second, independent axis of the scope. */
+function setShowUnattributed(on) {
+  config.setSetting(attribution.SHOW_UNATTRIBUTED_SETTING, on);
 }
 
 function addRep(id, name, extra = {}) {
@@ -285,11 +291,11 @@ describe('repScopeFilter: the one helper everything reuses', () => {
 
   test('repScopeSummary drives the "showing X of Y reps" indicator', () => {
     assert.deepEqual(attribution.repScopeSummary(), {
-      active: false, visible: 3, total: 3, hidden: 0, visibleRepIds: null,
+      active: false, visible: 3, total: 3, hidden: 0, visibleRepIds: null, showUnattributed: true,
     });
     setScope(ONLY_SP1);
     assert.deepEqual(attribution.repScopeSummary(), {
-      active: true, visible: 1, total: 3, hidden: 2, visibleRepIds: ['SP1'],
+      active: true, visible: 1, total: 3, hidden: 2, visibleRepIds: ['SP1'], showUnattributed: true,
     });
   });
 
@@ -299,6 +305,144 @@ describe('repScopeFilter: the one helper everything reuses', () => {
     assert.equal(all.length, 3, 'the Reps page must never hide the reps you manage');
     assert.deepEqual(all.filter((r) => r.visible).map((r) => r.id), ['SP1']);
     assert.deepEqual(attribution.listReps({ visibleOnly: true }).map((r) => r.id), ['SP1']);
+  });
+});
+
+// ===========================================================================
+// hiding unattributed data — the second, independent axis
+// ===========================================================================
+
+describe('show_unattributed', () => {
+  beforeEach(() => seedWorld());
+
+  test('defaults to true, so nothing changes for an existing install', () => {
+    assert.equal(attribution.showUnattributed(), true);
+    assert.equal(attribution.repScopeActive(), false);
+    assert.equal(attribution.invoiceScopeFilter('i').active, false);
+  });
+
+  test('EDGE CASE: all reps visible + unattributed hidden is an ACTIVE filter', () => {
+    setScope(null); // every rep
+    setShowUnattributed(false);
+
+    assert.equal(attribution.repScopeActive(), true, 'no rep is hidden, but the filter is still on');
+
+    const scope = attribution.invoiceScopeFilter('i');
+    assert.equal(scope.active, true);
+    assert.match(scope.sql, /IS NOT NULL$/, 'with no id list to match, the rule is simply "has a rep"');
+    assert.deepEqual(scope.params, {}, 'nothing to bind in this state');
+
+    // every rep-attributed row survives; only the unattributed one goes
+    assert.equal(attribution.isInvoiceVisible('I1'), true, 'SP1');
+    assert.equal(attribution.isInvoiceVisible('I2'), true, 'SP2 — still visible, no rep is hidden');
+    assert.equal(attribution.isInvoiceVisible('I3'), false, 'no salesperson');
+    assert.equal(attribution.isCustomerVisible('C1'), true);
+    assert.equal(attribution.isCustomerVisible('C2'), true);
+    assert.equal(attribution.isCustomerVisible('C3'), false);
+  });
+
+  test('combined with a rep subset, only that rep survives', () => {
+    setScope(ONLY_SP1);
+    setShowUnattributed(false);
+
+    const scope = attribution.invoiceScopeFilter('i');
+    assert.equal(scope.active, true);
+    assert.equal(
+      scope.sql.includes('@repscope_none,'),
+      false,
+      'the sentinel is bound for the IFNULL but must NOT be in the IN list'
+    );
+    assert.ok('repscope_none' in scope.params, 'IFNULL references it, so it must still be bound');
+
+    assert.equal(attribution.isInvoiceVisible('I1'), true);
+    assert.equal(attribution.isInvoiceVisible('I2'), false);
+    assert.equal(attribution.isInvoiceVisible('I3'), false);
+  });
+
+  test('no reps and no unattributed hides absolutely everything', () => {
+    setScope([]);
+    setShowUnattributed(false);
+    const scope = attribution.invoiceScopeFilter('i');
+    assert.equal(scope.sql, '0 = 1');
+    assert.deepEqual(scope.params, {});
+    assert.equal(attribution.isInvoiceVisible('I1'), false);
+    assert.equal(attribution.isInvoiceVisible('I3'), false);
+  });
+
+  test('isRepVisible(null) follows the setting', () => {
+    assert.equal(attribution.isRepVisible(null), true);
+    setShowUnattributed(false);
+    assert.equal(attribution.isRepVisible(null), false);
+    assert.equal(attribution.isRepVisible('SP2'), true, 'reps themselves are untouched');
+  });
+
+  test('a malformed value fails open rather than hiding a third of the org', () => {
+    config.setSetting(attribution.SHOW_UNATTRIBUTED_SETTING, 'maybe');
+    assert.equal(attribution.showUnattributed(), true);
+    assert.equal(attribution.repScopeActive(), false);
+  });
+
+  test('repScopeSummary reports the unattributed axis in every combination', () => {
+    setShowUnattributed(false);
+    assert.deepEqual(attribution.repScopeSummary(), {
+      active: true, visible: 3, total: 3, hidden: 0, visibleRepIds: null, showUnattributed: false,
+    });
+
+    setScope(ONLY_SP1);
+    assert.deepEqual(attribution.repScopeSummary(), {
+      active: true, visible: 1, total: 3, hidden: 2, visibleRepIds: ['SP1'], showUnattributed: false,
+    });
+  });
+
+  test('the rollups drop the unattributed row and its money', () => {
+    setShowUnattributed(false);
+    const out = performance.summary('2026-05');
+
+    assert.equal(out.rows.some((r) => r.rep_id === null), false, 'no "Unattributed" row');
+    assert.equal(out.totals.sales, 3000, '3500 less the 500 unattributed invoice');
+
+    setScope(ONLY_SP1);
+    assert.equal(performance.summary('2026-05').totals.sales, 1000, 'SP1 alone');
+    assert.equal(performance.brandRollup({ months: 1, endMonth: '2026-05' }).total, 1000);
+    assert.equal(performance.products({ month: '2026-05' }).totals.revenue, 1000);
+  });
+
+  test('dormant, cheques and focus drop their unattributed rows too', () => {
+    cheques.createCheque({ customer_id: 'C1', amount: 100, deposit_date: '2026-06-10' });
+    cheques.createCheque({ customer_id: 'C3', amount: 300, deposit_date: '2026-06-10' });
+    focus.createFocus({ month: '2026-06', customer_id: 'C1' });
+    focus.createFocus({ month: '2026-06', customer_id: 'C3' });
+
+    setScope(ONLY_SP1);
+    setShowUnattributed(false);
+
+    assert.deepEqual(
+      dormant.listDormant({ months: 3, now: new Date('2026-11-01T10:00:00') }).rows.map((r) => r.id),
+      ['C1']
+    );
+    assert.deepEqual(cheques.listCheques().rows.map((r) => r.customer_id), ['C1']);
+    assert.deepEqual(focus.listFocus('2026-06').rows.map((r) => r.customer_id), ['C1']);
+  });
+
+  test('an unattributed customer already reached nobody, and still does', () => {
+    // C3 has no rep, so its overdue invoice was never routed to a digest even
+    // when visible — confirmed both ways rather than redesigned
+    const visible = engine.evaluate({ date: '2026-06-01', now: new Date('2026-06-01T09:00:00') });
+    assert.equal(visible.stats.overdue.unrouted, 1);
+    assert.equal(
+      visible.digests.some((d) => d.sections.overdue.some((g) => g.customer_id === 'C3')),
+      false
+    );
+
+    setShowUnattributed(false);
+    const hidden = engine.evaluate({ date: '2026-06-01', now: new Date('2026-06-01T09:00:00') });
+    assert.equal(hidden.stats.overdue.unrouted, 0, 'now it is filtered out before routing');
+    assert.equal(
+      hidden.digests.some((d) => d.sections.overdue.some((g) => g.customer_id === 'C3')),
+      false
+    );
+    // the reps themselves are unaffected
+    assert.deepEqual(hidden.digests.map((d) => d.rep.id).sort(), ['SP1', 'SP2']);
   });
 });
 
@@ -590,7 +734,9 @@ describe('scope: API routes', () => {
     const put = await call('PUT', '/api/settings', { visible_rep_ids: ['SP1', 'SP3'] });
     assert.equal(put.status, 200);
     assert.deepEqual(put.json.settings.visible_rep_ids, ['SP1', 'SP3']);
-    assert.deepEqual(put.json.repScope, { active: true, visible: 2, total: 3, hidden: 1, visibleRepIds: ['SP1', 'SP3'] });
+    assert.deepEqual(put.json.repScope, {
+      active: true, visible: 2, total: 3, hidden: 1, visibleRepIds: ['SP1', 'SP3'], showUnattributed: true,
+    });
 
     const back = await call('GET', '/api/settings');
     assert.deepEqual(back.json.settings.visible_rep_ids, ['SP1', 'SP3']);
@@ -708,6 +854,64 @@ describe('scope: API routes', () => {
     assert.deepEqual(meta.json.salespersons.map((s) => s.id), ['SP1']);
     assert.equal(meta.json.statuses.reduce((n, s) => n + s.n, 0), 2);
     await call('PUT', '/api/settings', { visible_rep_ids: null });
+  });
+
+  test('show_unattributed round-trips and defaults to true', async () => {
+    const initial = await call('GET', '/api/settings');
+    assert.equal(initial.json.settings.show_unattributed, true);
+    assert.equal(initial.json.repScope.showUnattributed, true);
+    assert.equal(initial.json.repScope.active, false);
+
+    const off = await call('PUT', '/api/settings', { show_unattributed: false });
+    assert.equal(off.status, 200);
+    assert.equal(off.json.settings.show_unattributed, false);
+    assert.equal(off.json.repScope.active, true, 'hiding unattributed alone activates the filter');
+    assert.equal(off.json.repScope.hidden, 0, '...without hiding any rep');
+
+    const back = await call('GET', '/api/settings');
+    assert.equal(back.json.settings.show_unattributed, false);
+
+    await call('PUT', '/api/settings', { show_unattributed: true });
+  });
+
+  test('hiding unattributed alone filters the lists but keeps every rep', async () => {
+    await call('PUT', '/api/settings', { show_unattributed: false });
+
+    const customers = await call('GET', '/api/customers');
+    assert.deepEqual(customers.json.rows.map((r) => r.id).sort(), ['C1', 'C2'], 'C3 has no rep');
+
+    const invoices = await call('GET', '/api/invoices');
+    assert.deepEqual(invoices.json.rows.map((r) => r.id).sort(), ['I1', 'I2']);
+    assert.equal(invoices.json.totals.amount, 3000);
+
+    const payments = await call('GET', '/api/payments');
+    assert.deepEqual(payments.json.rows.map((r) => r.id).sort(), ['P1', 'P2']);
+
+    const dash = await call('GET', '/api/dashboard');
+    assert.equal(dash.json.kpis.customers.total, 2);
+    assert.equal(dash.json.kpis.outstanding.amount, 3000);
+
+    // the unattributed customer is now a 404, the rep-owned ones are not
+    assert.equal((await call('GET', '/api/customers/C3')).status, 404);
+    assert.equal((await call('GET', '/api/invoices/I3')).status, 404);
+    assert.equal((await call('GET', '/api/customers/C2')).status, 200);
+    assert.equal((await call('GET', '/api/invoices/I2')).status, 200);
+
+    await call('PUT', '/api/settings', { show_unattributed: true });
+  });
+
+  test('both axes at once: one rep, no unattributed', async () => {
+    await call('PUT', '/api/settings', { visible_rep_ids: ['SP1'], show_unattributed: false });
+
+    const customers = await call('GET', '/api/customers');
+    assert.deepEqual(customers.json.rows.map((r) => r.id), ['C1']);
+
+    const reps = await call('GET', '/api/reps');
+    assert.equal(reps.json.rows.length, 3, 'the Reps page still shows everyone');
+    assert.equal(reps.json.repScope.showUnattributed, false);
+    assert.equal(reps.json.repScope.hidden, 2);
+
+    await call('PUT', '/api/settings', { visible_rep_ids: null, show_unattributed: true });
   });
 
   test('with the scope off every route reports everything again', async () => {

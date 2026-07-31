@@ -77,13 +77,22 @@ function RepScopeIndicator() {
   const scope = data?.repScope;
   if (!scope?.active) return null;
 
+  const repsHidden = scope.hidden > 0;
+  const unattributedHidden = scope.showUnattributed === false;
+
+  // three shapes: reps only, unattributed only, or both
+  const headline = repsHidden
+    ? `Showing ${scope.visible} of ${scope.total} reps`
+    : 'Unattributed hidden';
+  const detail = repsHidden
+    ? `${scope.hidden} hidden${unattributedHidden ? ' · unattributed hidden' : ''}`
+    : 'Records with no salesperson are filtered out';
+
   return (
-    <Link className="scope-indicator" to="/reps" title="Manage which reps the CRM operates on">
+    <Link className="scope-indicator" to="/reps" title="Manage what the CRM operates on">
       <span className="scope-dot" />
-      <span>
-        Showing {scope.visible} of {scope.total} reps
-      </span>
-      <em>{scope.hidden} hidden</em>
+      <span>{headline}</span>
+      <em>{detail}</em>
     </Link>
   );
 }

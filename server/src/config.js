@@ -109,8 +109,11 @@ const SETTING_DEFAULTS = {
   zoho_daily_call_budget: 2000,
   // Global rep visibility scope (services/attribution.js). null = every rep is
   // visible; an array of zoho_salesperson_ids narrows the whole CRM to them.
-  // Unattributed data is visible either way.
   visible_rep_ids: null,
+  // ...and whether rows with NO salesperson at all are shown. True by default:
+  // on the live org that is ~7,400 of 21,570 invoices, so hiding them is a
+  // deliberate choice, never a default.
+  show_unattributed: true,
   // Only invoices dated within this many months get their line items pulled
   // (one API call each). 0 = no limit. Widening it re-queues older invoices.
   line_item_backfill_months: 6,

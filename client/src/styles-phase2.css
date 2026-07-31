@@ -374,3 +374,13 @@
   margin-top: 2px;
   padding-left: 14px;
 }
+
+/* the pinned "no salesperson" pseudo-row on the Reps page */
+.data-table tr.unattributed-row td {
+  background: #f7f9fc;
+  border-bottom: 2px solid var(--line);
+}
+
+.data-table tr.unattributed-row .sub {
+  font-weight: 400;
+}

@@ -13,21 +13,23 @@ export default function Reps() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['reps'] }),
   });
 
-  // The visibility scope is a single setting, so it is edited as a whole and
-  // saved in one go rather than one checkbox at a time — flipping five reps
-  // should be one write, not five re-filtered reloads of the entire CRM.
+  // The visibility scope is two settings edited as one thing, so it is saved in
+  // one go rather than one checkbox at a time — flipping five reps should be one
+  // write, not five re-filtered reloads of the entire CRM. Unattributed data is
+  // the extra pseudo-row in the same list.
   const rowsData = data?.rows;
   const serverVisible = useMemo(
     () => (rowsData || []).filter((r) => r.visible).map((r) => r.id),
     [rowsData]
   );
+  const serverUnattributed = data?.repScope?.showUnattributed ?? true;
   const [draft, setDraft] = useState(null);
   useEffect(() => {
     setDraft(null);
-  }, [serverVisible]);
+  }, [serverVisible, serverUnattributed]);
 
   const saveScope = useMutation({
-    mutationFn: (ids) => api.put('/settings', { visible_rep_ids: ids }),
+    mutationFn: (body) => api.put('/settings', body),
     onSuccess: () => {
       setDraft(null);
       // the scope changes what every other screen shows
@@ -39,8 +41,15 @@ export default function Reps() {
   if (error) return <ErrorBox error={error} />;
 
   const rows = data?.rows || [];
-  const scope = data?.repScope || { active: false, visible: rows.length, total: rows.length };
-  const visibleIds = draft ?? serverVisible;
+  const scope = data?.repScope || {
+    active: false,
+    visible: rows.length,
+    total: rows.length,
+    hidden: 0,
+    showUnattributed: true,
+  };
+  const visibleIds = draft ? draft.ids : serverVisible;
+  const unattributedOn = draft ? draft.unattributed : serverUnattributed;
   const visibleSet = new Set(visibleIds);
   const scopeDirty = draft !== null;
   const allVisible = visibleIds.length === rows.length;
@@ -49,13 +58,23 @@ export default function Reps() {
     const next = new Set(visibleIds);
     if (on) next.add(id);
     else next.delete(id);
-    setDraft(rows.filter((r) => next.has(r.id)).map((r) => r.id));
+    setDraft({
+      ids: rows.filter((r) => next.has(r.id)).map((r) => r.id),
+      unattributed: unattributedOn,
+    });
+  }
+
+  function toggleUnattributed(on) {
+    setDraft({ ids: visibleIds, unattributed: on });
   }
 
   function saveVisibility() {
-    // all reps ticked === "no filter at all", which is null, not a list of
-    // everyone: a rep synced from Zoho tomorrow should then be visible too
-    saveScope.mutate(allVisible ? null : visibleIds);
+    saveScope.mutate({
+      // all reps ticked === "no rep filter at all", which is null, not a list of
+      // everyone: a rep synced from Zoho tomorrow should then be visible too
+      visible_rep_ids: allVisible ? null : visibleIds,
+      show_unattributed: unattributedOn,
+    });
   }
 
   return (
@@ -73,8 +92,18 @@ export default function Reps() {
 
       {scope.active ? (
         <Banner tone="warn">
-          The CRM is currently showing <strong>{num(scope.visible)} of {num(scope.total)} reps</strong>.{' '}
-          {num(scope.hidden)} rep(s) and everything belonging to their customers are hidden from every other page.
+          {scope.hidden ? (
+            <>
+              The CRM is currently showing <strong>{num(scope.visible)} of {num(scope.total)} reps</strong>.{' '}
+              {num(scope.hidden)} rep(s) and everything belonging to their customers are hidden from every other page.
+            </>
+          ) : null}
+          {scope.hidden && !scope.showUnattributed ? ' ' : null}
+          {!scope.showUnattributed ? (
+            <>
+              Records with <strong>no salesperson at all</strong> are hidden too.
+            </>
+          ) : null}
         </Banner>
       ) : null}
 
@@ -98,8 +127,8 @@ export default function Reps() {
         <p className="muted-text">
           <strong>Visible in CRM</strong> controls which reps this CRM operates on. Unchecked reps’ customers, sales,
           invoices, payments, cheques, focus items and reminder digests are hidden across every page — the data is
-          never deleted, just filtered out. Anything with <em>no</em> rep at all stays visible to everyone. Tick every
-          rep to turn the filter off completely.
+          never deleted, just filtered out. The pinned <em>Unattributed</em> row is the same switch for records that
+          carry no salesperson at all. Tick everything to turn the filter off completely.
         </p>
         <div className="table-wrap">
           <table className="data-table">
@@ -118,6 +147,27 @@ export default function Reps() {
               </tr>
             </thead>
             <tbody>
+              {/* not a salesperson — the bucket every record with no rep falls
+                  into, switched the same way and saved by the same button */}
+              <tr className={`unattributed-row ${unattributedOn ? '' : 'row-muted'}`}>
+                <td>
+                  <label className="check">
+                    <input
+                      type="checkbox"
+                      checked={unattributedOn}
+                      onChange={(e) => toggleUnattributed(e.target.checked)}
+                    />
+                    {unattributedOn ? 'Shown' : 'Hidden'}
+                  </label>
+                </td>
+                <td colSpan={9}>
+                  <strong>Unattributed</strong> <span className="sub">(no salesperson)</span>
+                  <div className="sub">
+                    Customers and invoices Zoho has no salesperson for. They belong to no rep, so they never appear in
+                    anyone’s reminder digest either way.
+                  </div>
+                </td>
+              </tr>
               {rows.length ? (
                 rows.map((rep) => (
                   <RepRow
