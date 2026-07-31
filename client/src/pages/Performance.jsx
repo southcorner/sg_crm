@@ -62,10 +62,16 @@ export default function Performance() {
     placeholderData: keepPreviousData,
   });
 
+  // filter options come from the visible-rep list, not the summary rows — a rep
+  // with no sales in the selected month must still be selectable
+  const filtersQuery = useQuery({
+    queryKey: ['invoices', 'meta', 'filters'],
+    queryFn: () => api.get('/invoices/meta/filters'),
+  });
+
   const summary = summaryQuery.data;
-  const reps = summary?.rows?.filter((r) => r.rep_id) || [];
   const brandOptions = (summary?.brands || []).map((b) => ({ value: b.id, label: b.name }));
-  const repOptions = reps.map((r) => ({ value: r.rep_id, label: r.rep_name }));
+  const repOptions = (filtersQuery.data?.salespersons || []).map((r) => ({ value: r.id, label: r.name }));
 
   return (
     <div className="page">
