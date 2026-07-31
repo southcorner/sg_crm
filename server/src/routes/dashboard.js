@@ -17,6 +17,7 @@ const cheques = require('../services/cheques');
 const dormant = require('../services/dormant');
 const focus = require('../services/focus');
 const reminders = require('../services/reminders/engine');
+const whatsapp = require('../services/reminders/whatsapp');
 
 const router = express.Router();
 
@@ -138,6 +139,9 @@ router.get(
       mtdBrands: perf.mtdBrands(),
       // phase 4 — who got their digest today / yesterday, and on which channel
       reminders: reminders.digestStatus(),
+      // phase 5 — session state for the "scan the QR" banner. The QR itself is
+      // deliberately left out: it belongs on the Settings page, not here.
+      whatsapp: whatsapp.getStatus({ includeQr: false }),
       sync: {
         running: syncStatus.running,
         connected: syncStatus.connected,

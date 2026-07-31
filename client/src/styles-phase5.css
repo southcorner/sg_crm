@@ -1,0 +1,100 @@
+/* ---- phase 5: the WhatsApp session ---- */
+
+.honest-list {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.honest-list strong {
+  color: var(--ink);
+}
+
+.wa-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 20px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #f7f9fb;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.wa-status-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wa-label {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.wa-value {
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.wa-qr-block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.wa-qr {
+  width: 280px;
+  height: 280px;
+  image-rendering: pixelated;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.wa-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13.5px;
+  line-height: 1.8;
+  color: var(--ink);
+  max-width: 380px;
+}
+
+.wa-qr-block .muted-text {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+/* channel badges in the reminder log and the dashboard digest rows */
+.channel-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  border: 1px solid var(--line);
+  background: #f4f6f8;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+.channel-chip.whatsapp {
+  border-color: #b7e2c4;
+  background: #eaf7ee;
+  color: #1c6b39;
+}
+
+.channel-chip.whatsapp.failed {
+  border-color: #eec6c0;
+  background: #fdefec;
+  color: var(--danger);
+}

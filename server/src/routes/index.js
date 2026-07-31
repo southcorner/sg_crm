@@ -21,6 +21,7 @@ const focusRoutes = require('./focus');
 const dormantRoutes = require('./dormant');
 const chequeRoutes = require('./cheques');
 const reminderRoutes = require('./reminders');
+const whatsappRoutes = require('./whatsapp');
 const settingsRoutes = require('./settings');
 const config = require('../config');
 
@@ -54,6 +55,9 @@ router.use('/cheques', chequeRoutes);
 
 // phase 4 — reminder engine, digests, cron
 router.use('/reminders', reminderRoutes);
+
+// phase 5 — WhatsApp session (whatsapp-web.js)
+router.use('/whatsapp', whatsappRoutes);
 
 router.use('/settings', settingsRoutes);
 

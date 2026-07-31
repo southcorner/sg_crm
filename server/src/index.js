@@ -21,6 +21,7 @@ const { ensureAdminUser } = require('./services/adminUser');
 const { requireAuth } = require('./middleware/auth');
 const apiRoutes = require('./routes');
 const cronJobs = require('./jobs/cron');
+const whatsapp = require('./services/reminders/whatsapp');
 
 function bootstrapDatabase() {
   const db = getDb();
@@ -98,16 +99,28 @@ function start() {
     // schedulers live in this process; nothing else may start them
     const cronStatus = cronJobs.start();
     logger.info({ cron: cronStatus.started, sendTime: cronStatus.sendTime }, 'cron boot');
+
+    // Lazy by design: no puppeteer, no Chromium, no session unless the admin
+    // has switched the channel on in Settings → WhatsApp.
+    whatsapp
+      .initializeIfEnabled()
+      .then((s) => logger.info({ enabled: s.enabled, state: s.state }, 'whatsapp boot'))
+      .catch((err) => logger.error({ err: err.message }, 'whatsapp boot failed'));
   });
 
   const shutdown = (signal) => {
     logger.info({ signal }, 'shutting down');
     cronJobs.stop();
-    server.close(() => {
-      closeDb();
-      process.exit(0);
-    });
-    setTimeout(() => process.exit(1), 5000).unref();
+    // close the browser before the process goes, or Chromium is orphaned
+    Promise.resolve(whatsapp.destroy())
+      .catch((err) => logger.warn({ err: err.message }, 'whatsapp shutdown failed'))
+      .then(() => {
+        server.close(() => {
+          closeDb();
+          process.exit(0);
+        });
+      });
+    setTimeout(() => process.exit(1), 20000).unref();
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));

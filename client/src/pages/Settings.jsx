@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { fmtDateTime, timeAgo, num, titleCase } from '../format.js';
-import { Card, Loading, ErrorBox, StatusChip, ProgressBar, Tabs } from '../components/ui.jsx';
+import { Card, Loading, ErrorBox, StatusChip, ProgressBar, Tabs, Banner } from '../components/ui.jsx';
 
 const ENTITY_LABELS = {
   salespersons: 'Salespersons',
@@ -21,7 +21,7 @@ export default function Settings() {
     <div className="page">
       <header className="page-header">
         <h1>Settings</h1>
-        <p className="page-sub">Zoho connection, sync control and the daily reminder digest. WhatsApp lands in phase 5.</p>
+        <p className="page-sub">Zoho connection, sync control, the daily reminder digest and the WhatsApp session.</p>
       </header>
 
       <Tabs
@@ -36,11 +36,7 @@ export default function Settings() {
       />
 
       {tab === 'zoho' && <ZohoTab />}
-      {tab === 'whatsapp' && (
-        <Card title="WhatsApp">
-          <p className="muted-text">The WhatsApp session and QR pairing land in phase 5.</p>
-        </Card>
-      )}
+      {tab === 'whatsapp' && <WhatsAppTab />}
       {tab === 'reminders' && <RemindersTab />}
       {tab === 'account' && (
         <Card title="Account">
@@ -48,6 +44,241 @@ export default function Settings() {
         </Card>
       )}
     </div>
+  );
+}
+
+const WA_STATE = {
+  disconnected: { label: 'Not running', tone: 'muted' },
+  initializing: { label: 'Starting…', tone: 'info' },
+  qr_pending: { label: 'Waiting for a scan', tone: 'warn' },
+  authenticated: { label: 'Authenticated', tone: 'info' },
+  ready: { label: 'Ready', tone: 'ok' },
+};
+
+/**
+ * The WhatsApp session: a QR pairing, not an API key — so this tab is mostly a
+ * window onto a state machine. It polls /api/whatsapp/status every 3 s while it
+ * is open (and only while it is open), because the QR appears asynchronously
+ * once the headless browser has booted and expires on its own.
+ */
+function WhatsAppTab() {
+  const queryClient = useQueryClient();
+  const [testNumber, setTestNumber] = useState('');
+  const [confirmLogout, setConfirmLogout] = useState(false);
+
+  const statusQuery = useQuery({
+    queryKey: ['whatsapp-status'],
+    queryFn: () => api.get('/whatsapp/status'),
+    refetchInterval: 3000,
+  });
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ['whatsapp-status'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    queryClient.invalidateQueries({ queryKey: ['reminders-status'] });
+  };
+
+  const toggle = useMutation({
+    mutationFn: (enabled) => api.post(`/whatsapp/${enabled ? 'enable' : 'disable'}`),
+    onSuccess: (res) => {
+      queryClient.setQueryData(['whatsapp-status'], res);
+      invalidate();
+    },
+  });
+  const restart = useMutation({ mutationFn: () => api.post('/whatsapp/restart'), onSuccess: invalidate });
+  const logout = useMutation({
+    mutationFn: () => api.post('/whatsapp/logout'),
+    onSuccess: () => {
+      setConfirmLogout(false);
+      invalidate();
+    },
+  });
+  const sendTest = useMutation({
+    mutationFn: (number) => api.post('/whatsapp/test', number ? { number } : {}),
+    onSuccess: invalidate,
+  });
+
+  const s = statusQuery.data;
+  const state = s?.state || 'disconnected';
+  const view = WA_STATE[state] || { label: state, tone: 'muted' };
+  const enabled = Boolean(s?.enabled);
+
+  return (
+    <>
+      <ErrorBox error={statusQuery.error || toggle.error || restart.error || logout.error} />
+
+      <Card
+        title="WhatsApp delivery"
+        actions={
+          <button
+            type="button"
+            className={enabled ? 'btn danger ghost' : 'btn'}
+            onClick={() => toggle.mutate(!enabled)}
+            disabled={toggle.isPending}
+          >
+            {toggle.isPending ? 'Working…' : enabled ? 'Disable WhatsApp' : 'Enable WhatsApp'}
+          </button>
+        }
+      >
+        <p className="muted-text">
+          Digests can go out on WhatsApp as well as email. This uses <strong>whatsapp-web.js</strong>, an{' '}
+          <strong>unofficial</strong> library that drives a real WhatsApp Web session in a headless browser — the same
+          thing as keeping WhatsApp Web open on this machine. Please read the honest version before switching it on:
+        </p>
+        <ul className="honest-list">
+          <li>
+            <strong>Use a dedicated number.</strong> Pair a spare SIM, not the owner's personal phone.
+          </li>
+          <li>
+            <strong>There is a ban risk.</strong> Automation is against WhatsApp's terms. The CRM keeps volume tiny
+            (one digest per rep per day, sent one at a time with a random 4–8 second gap), but the risk is never zero.
+          </li>
+          <li>
+            <strong>It breaks occasionally.</strong> A WhatsApp Web update can stop the library working until it is
+            updated; the phone can also unlink the session by itself.
+          </li>
+          <li>
+            <strong>Email is never affected.</strong> If the session is down at digest time, reps still get their
+            email and the log says <code>session_down</code> — nothing is retried later.
+          </li>
+        </ul>
+        {!enabled ? (
+          <p className="muted-text">
+            While this is off, the server never launches a browser and no WhatsApp rows are written to the reminder
+            log.
+          </p>
+        ) : null}
+      </Card>
+
+      <Card
+        title="Session"
+        actions={
+          <div className="panel-actions">
+            <StatusChip value={view.label} tone={view.tone} />
+            <button
+              type="button"
+              className="btn ghost small"
+              onClick={() => restart.mutate()}
+              disabled={!enabled || restart.isPending}
+            >
+              {restart.isPending ? 'Restarting…' : 'Restart'}
+            </button>
+            <button
+              type="button"
+              className="btn danger ghost small"
+              onClick={() => setConfirmLogout(true)}
+              disabled={logout.isPending}
+            >
+              Log out
+            </button>
+          </div>
+        }
+      >
+        {statusQuery.isLoading && !s ? (
+          <Loading />
+        ) : (
+          <>
+            <div className="wa-status-grid">
+              <div>
+                <span className="wa-label">State</span>
+                <span className="wa-value">{view.label}</span>
+              </div>
+              <div>
+                <span className="wa-label">Last ready</span>
+                <span className="wa-value">{s?.lastReadyAt ? `${timeAgo(s.lastReadyAt)} (${fmtDateTime(s.lastReadyAt)})` : 'never'}</span>
+              </div>
+              <div>
+                <span className="wa-label">Linked number</span>
+                <span className="wa-value">{s?.me?.number ? `+${s.me.number}` : '—'}</span>
+              </div>
+              <div>
+                <span className="wa-label">Queue</span>
+                <span className="wa-value">
+                  {num(s?.queue || 0)} waiting{s?.sending ? ' · sending' : ''}
+                </span>
+              </div>
+              {s?.nextRetryAt ? (
+                <div>
+                  <span className="wa-label">Next reconnect</span>
+                  <span className="wa-value">
+                    {fmtDateTime(s.nextRetryAt)} (attempt {s.attempts})
+                  </span>
+                </div>
+              ) : null}
+            </div>
+
+            {s?.lastError ? <Banner tone="warn">Last error: {s.lastError}</Banner> : null}
+
+            {state === 'qr_pending' && s?.qrDataUrl ? (
+              <div className="wa-qr-block">
+                <img className="wa-qr" src={s.qrDataUrl} alt="WhatsApp pairing QR code" width="280" height="280" />
+                <ol className="wa-steps">
+                  <li>Open WhatsApp on the phone that should send the digests.</li>
+                  <li>
+                    Tap <strong>Settings → Linked devices → Link a device</strong>.
+                  </li>
+                  <li>Point the camera at this code.</li>
+                  <li>Keep that phone online — the session lives on it, not here.</li>
+                </ol>
+                <p className="muted-text">
+                  The code refreshes by itself every few seconds; this page picks the new one up automatically.
+                </p>
+              </div>
+            ) : null}
+
+            {enabled && state === 'initializing' ? (
+              <p className="muted-text">Starting the headless browser — the QR code usually appears within 10–30 seconds.</p>
+            ) : null}
+            {!enabled ? <p className="muted-text">Enable WhatsApp above to start a session.</p> : null}
+          </>
+        )}
+
+        {confirmLogout ? (
+          <div className="backfill-block">
+            <h3>Unlink this session?</h3>
+            <p className="muted-text">
+              This logs the CRM out of WhatsApp and deletes the saved session in <code>data/wwebjs</code>. Pairing
+              again means scanning a fresh QR code on the phone.
+            </p>
+            <div className="form-row">
+              <button type="button" className="btn danger" onClick={() => logout.mutate()} disabled={logout.isPending}>
+                {logout.isPending ? 'Unlinking…' : 'Yes, unlink'}
+              </button>
+              <button type="button" className="btn ghost" onClick={() => setConfirmLogout(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Card>
+
+      <Card title="Send a test message">
+        <form
+          className="inline-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            sendTest.mutate(testNumber.trim());
+          }}
+        >
+          <input
+            type="tel"
+            placeholder={s?.testNumber || '+91 98765 43210'}
+            value={testNumber}
+            onChange={(e) => setTestNumber(e.target.value)}
+          />
+          <button type="submit" className="btn ghost" disabled={sendTest.isPending || state !== 'ready'}>
+            {sendTest.isPending ? 'Sending…' : 'Send test message'}
+          </button>
+          {sendTest.isError ? <span className="form-error">{sendTest.error.message}</span> : null}
+          {sendTest.isSuccess ? <span className="form-ok">Delivered to {sendTest.data.to}.</span> : null}
+        </form>
+        <p className="muted-text">
+          A 10-digit number is assumed to be Indian (+91). The number is remembered for next time. Reps' own numbers
+          and their WhatsApp opt-in live on <Link className="link" to="/reps">Reps</Link>; the session must be{' '}
+          <strong>Ready</strong> before anything can be sent.
+        </p>
+      </Card>
+    </>
   );
 }
 

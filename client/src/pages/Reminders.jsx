@@ -67,6 +67,7 @@ export default function Reminders() {
   const reps = log?.reps || [];
   const smtp = statusQuery.data?.smtp;
   const cron = statusQuery.data?.cron;
+  const whatsapp = statusQuery.data?.whatsapp;
   const isToday = date === todayIso();
 
   return (
@@ -83,6 +84,12 @@ export default function Reminders() {
         <Banner tone="warn">
           SMTP is not configured — digests cannot be delivered. Set the mail server in{' '}
           <Link to="/settings">Settings → Reminders</Link>.
+        </Banner>
+      ) : null}
+      {whatsapp && whatsapp.enabled && !whatsapp.ready ? (
+        <Banner tone="warn">
+          WhatsApp session down ({whatsapp.state}) — digests go out by email only and every WhatsApp row below is
+          logged as <code>session_down</code>. Scan the QR in <Link to="/settings">Settings → WhatsApp</Link>.
         </Banner>
       ) : null}
       {cron && cron.enabled === false ? (
@@ -197,7 +204,15 @@ export default function Reminders() {
                         {row.label || row.entity_id || '—'}
                         {row.entity_type ? <div className="sub">{row.entity_type.replace(/_/g, ' ')}</div> : null}
                       </td>
-                      <td>{row.channel || '—'}</td>
+                      <td className="nowrap">
+                        {row.channel
+                          ? row.channel.split(',').map((c) => (
+                              <span key={c} className={`channel-chip ${c} ${row.status}`}>
+                                {c}
+                              </span>
+                            ))
+                          : '—'}
+                      </td>
                       <td>
                         <span className={`chip ${STATUS_TONE[row.status] || 'muted'}`}>{titleCase(row.status)}</span>
                       </td>

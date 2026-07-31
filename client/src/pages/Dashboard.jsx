@@ -34,6 +34,8 @@ export default function Dashboard() {
         </div>
       ) : null}
 
+      <WhatsAppBanner whatsapp={data.whatsapp} reminders={data.reminders} />
+
       {data.sync.lineItems.pending > 0 ? (
         <div className="banner info">
           Invoice line items: {num(data.sync.lineItems.synced)} of {num(data.sync.lineItems.total)} invoices
@@ -227,6 +229,36 @@ export default function Dashboard() {
   );
 }
 
+/**
+ * The one thing an admin must be told about WhatsApp on the dashboard: the
+ * session needs a human with a phone. Silent while the channel is off (the
+ * default) or healthy — a dashboard that always shows a warning teaches people
+ * to ignore warnings.
+ */
+function WhatsAppBanner({ whatsapp, reminders }) {
+  if (!whatsapp || !whatsapp.enabled) return null;
+  const missedDigest = Boolean(reminders?.today?.whatsappDown || reminders?.yesterday?.whatsappDown);
+  if (whatsapp.ready && !missedDigest) return null;
+
+  if (whatsapp.state === 'qr_pending') {
+    return (
+      <div className="banner warn">
+        WhatsApp session down — scan the QR code in <Link to="/settings">Settings → WhatsApp</Link> to link the phone
+        again. Digests are going out by email only.
+      </div>
+    );
+  }
+
+  return (
+    <div className="banner warn">
+      WhatsApp session down ({whatsapp.state}
+      {whatsapp.lastError ? `: ${whatsapp.lastError}` : ''}) — reconnecting automatically; if it does not come back,
+      scan the QR in <Link to="/settings">Settings → WhatsApp</Link>.
+      {missedDigest ? ' A digest already went out email-only while the session was down.' : ''}
+    </div>
+  );
+}
+
 const DIGEST_TONE = {
   sent: 'ok',
   failed: 'bad',
@@ -282,7 +314,22 @@ function DigestStatus({ data }) {
                     <span className="name" title={rep.email || ''}>
                       {rep.rep_name}
                     </span>
-                    {rep.channel ? <span className="when">{rep.channel}</span> : null}
+                    {rep.channels?.length ? (
+                      <span className="when">
+                        {rep.channels.map((c) => (
+                          <span
+                            key={c.channel}
+                            className={`channel-chip ${c.channel} ${c.status}`}
+                            title={c.error ? `${c.channel}: ${c.error}` : `${c.channel}: ${c.status}`}
+                          >
+                            {c.channel}
+                            {c.status === 'failed' ? ' ✕' : ''}
+                          </span>
+                        ))}
+                      </span>
+                    ) : rep.channel ? (
+                      <span className="when">{rep.channel}</span>
+                    ) : null}
                     <span className="when">{rep.at ? timeAgo(rep.at) : ''}</span>
                     <span className={`chip ${DIGEST_TONE[rep.status] || 'muted'}`}>
                       {DIGEST_LABEL[rep.status] || rep.status}

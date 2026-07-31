@@ -19,6 +19,7 @@ const { z } = require('zod');
 const { route, asyncRoute, sendError, parsePaging, listResponse } = require('./util');
 const engine = require('../services/reminders/engine');
 const email = require('../services/reminders/email');
+const whatsapp = require('../services/reminders/whatsapp');
 const cronJobs = require('../jobs/cron');
 
 const router = express.Router();
@@ -134,6 +135,7 @@ router.get(
     res.json({
       cron: cronJobs.getStatus(),
       smtp: email.status(),
+      whatsapp: whatsapp.getStatus({ includeQr: false }),
       digest: engine.digestStatus(),
     })
   )

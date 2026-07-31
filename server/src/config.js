@@ -76,6 +76,10 @@ const SETTING_DEFAULTS = {
   overdue_resend_days: 7,
   zoho_daily_call_budget: 2000,
   sync_enabled: false,
+  // WhatsApp (phase 5) — off until an admin pairs a phone in Settings. Boot
+  // never launches puppeteer while this is false.
+  whatsapp_enabled: false,
+  whatsapp_test_number: '',
   // SMTP — seeded empty so the settings UI has something to bind to. The
   // password is deliberately NOT seeded: it is write-only via /api/settings.
   smtp_host: '',

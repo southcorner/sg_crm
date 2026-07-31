@@ -46,6 +46,7 @@ const chequeService = require('../cheques');
 const dormantService = require('../dormant');
 const focusService = require('../focus');
 const email = require('./email');
+const whatsapp = require('./whatsapp');
 
 // --- constants --------------------------------------------------------------
 
@@ -58,7 +59,9 @@ const STATUS = {
   SKIPPED: 'skipped',
 };
 
-const CHANNELS = ['email']; // phase 5 appends 'whatsapp'
+// Email first, deliberately: it is the channel that must never be delayed by a
+// WhatsApp session that has gone quiet.
+const CHANNELS = ['email', 'whatsapp'];
 const DORMANT_MAX_PER_DIGEST = 10;
 const DORMANT_SUPPRESS_DAYS = 14;
 
@@ -142,8 +145,16 @@ function settingsSnapshot() {
  * address decide whether the email channel is eligible — an active rep with the
  * flag off is still evaluated (so the preview shows what they *would* get) but
  * run() finds no channel and records a skip rather than sending.
+ *
+ * WhatsApp is listed as a channel for EVERY rep while the feature is switched on,
+ * even for reps with no number or the flag off. That is on purpose: the sender
+ * then fails with `no_number` / `opted_out` / `session_down` and the reminder log
+ * says out loud why a rep did not get a WhatsApp message, instead of the channel
+ * silently disappearing. With `whatsapp_enabled` false — the default — no
+ * whatsapp rows are written at all.
  */
 function digestReps() {
+  const waEnabled = whatsapp.isEnabled();
   return getDb()
     .prepare(
       `SELECT zoho_salesperson_id AS id, name, email, crm_email, whatsapp_number,
@@ -163,7 +174,7 @@ function digestReps() {
         notify_email: Boolean(r.notify_email),
         notify_whatsapp: Boolean(r.notify_whatsapp),
         whatsapp_number: r.whatsapp_number || null,
-        channels: r.notify_email && address ? ['email'] : [],
+        channels: [...(r.notify_email && address ? ['email'] : []), ...(waEnabled ? ['whatsapp'] : [])],
       };
     });
 }
@@ -792,13 +803,30 @@ function digestAlreadyRun(runDate, repId) {
 /**
  * Channel registry. A sender takes the composed digest and resolves with
  * anything worth logging, or throws — the engine records `failed` and moves on
- * to the next rep. Phase 5 adds `whatsapp` here.
+ * to the next channel/rep.
+ *
+ * The WhatsApp sender throws one of three bare reasons so the log reads as a
+ * diagnosis rather than a stack trace:
+ *   opted_out     the rep has notify_whatsapp off
+ *   no_number     nobody has filled in whatsapp_number on Reps
+ *   session_down  the phone is unlinked / the session broke — scan the QR again
+ * Whatever happens here, email has already been attempted: WhatsApp failing is
+ * never a reason for a rep to hear nothing. Nothing is retried later — a digest
+ * is a snapshot of a morning, and a stale one is worse than none.
  */
 function defaultSenders() {
   return {
     email: async (digest) => {
       const info = await email.sendEmail(digest.rep.email, digest.subject, digest.html, digest.text);
       return { to: digest.rep.email, messageId: info.messageId || null };
+    },
+    whatsapp: async (digest) => {
+      const { rep } = digest;
+      if (!rep.notify_whatsapp) throw new Error(whatsapp.REASON.OPTED_OUT);
+      if (!rep.whatsapp_number) throw new Error(whatsapp.REASON.NO_NUMBER);
+      if (!whatsapp.isReady()) throw new Error(whatsapp.REASON.SESSION_DOWN);
+      const info = await whatsapp.sendMessage(rep.whatsapp_number, digest.text);
+      return { to: info.to, messageId: info.id || null };
     },
   };
 }
@@ -1036,11 +1064,15 @@ function digestStatus({ now = new Date(), date = null } = {}) {
     }
     const repRows = reps.map((rep) => {
       const row = best.get(rep.id);
+      const channels = row && row.detail && Array.isArray(row.detail.channels) ? row.detail.channels : [];
       return {
         rep_id: rep.id,
         rep_name: rep.name,
         email: rep.email,
         notify_email: rep.notify_email,
+        notify_whatsapp: rep.notify_whatsapp,
+        whatsapp_number: rep.whatsapp_number,
+        channels,
         status: row ? row.status : 'none',
         channel: row ? row.channel : null,
         at: row ? row.created_at : null,
@@ -1052,6 +1084,7 @@ function digestStatus({ now = new Date(), date = null } = {}) {
             : (row && row.detail && row.detail.reason) || null,
       };
     });
+    const waChannel = (rep) => rep.channels.find((c) => c.channel === 'whatsapp') || null;
     return {
       date: day,
       reps: repRows,
@@ -1059,10 +1092,18 @@ function digestStatus({ now = new Date(), date = null } = {}) {
       failed: repRows.filter((r) => r.status === 'failed').length,
       skipped: repRows.filter((r) => String(r.status).startsWith('skipped')).length,
       none: repRows.filter((r) => r.status === 'none').length,
+      whatsappSent: repRows.filter((r) => (waChannel(r) || {}).status === 'sent').length,
+      // the banner trigger: a digest went out while the session was down
+      whatsappDown: repRows.some((r) => (waChannel(r) || {}).error === whatsapp.REASON.SESSION_DOWN),
     };
   };
 
-  return { today: build(today), yesterday: build(yesterday), sendTime: String(config.getSetting('digest_send_time', '09:00')) };
+  return {
+    today: build(today),
+    yesterday: build(yesterday),
+    sendTime: String(config.getSetting('digest_send_time', '09:00')),
+    whatsapp: whatsapp.getStatus({ includeQr: false }),
+  };
 }
 
 module.exports = {
