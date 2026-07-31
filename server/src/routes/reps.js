@@ -6,6 +6,12 @@
  *
  * Only the CRM-owned columns are writable here — the Zoho name/email are
  * overwritten by every sync and must not be edited in the CRM.
+ *
+ * This endpoint DELIBERATELY ignores the global rep visibility scope and always
+ * returns every salesperson: it is the page where that scope is managed, so
+ * hiding reps here would make the setting impossible to undo. Each row carries
+ * `visible`, and `repScope` summarises the current state. The scope itself is
+ * written through PUT /api/settings {visible_rep_ids}.
  */
 
 const express = require('express');
@@ -31,7 +37,9 @@ const updateSchema = z.object({
 
 router.get(
   '/',
-  route((_req, res) => res.json({ rows: attribution.listReps() }))
+  route((_req, res) =>
+    res.json({ rows: attribution.listReps(), repScope: attribution.repScopeSummary() })
+  )
 );
 
 router.put(
@@ -40,7 +48,7 @@ router.put(
     const parsed = updateSchema.safeParse(req.body || {});
     if (!parsed.success) return sendError(res, parsed.error);
     const rep = attribution.updateRep(String(req.params.id), parsed.data);
-    return res.json({ rep, rows: attribution.listReps() });
+    return res.json({ rep, rows: attribution.listReps(), repScope: attribution.repScopeSummary() });
   })
 );
 

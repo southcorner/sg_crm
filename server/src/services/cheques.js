@@ -22,7 +22,8 @@
 
 const { getDb } = require('../db/connection');
 const config = require('../config');
-const { customerRepIdExpr, todayIso, currentRep } = require('./attribution');
+const attribution = require('./attribution');
+const { customerRepIdExpr, todayIso, currentRep } = attribution;
 
 const STATUSES = ['pending', 'deposited', 'cleared', 'bounced'];
 const PENDING = 'pending';
@@ -54,6 +55,9 @@ function leadDays() {
  * routed to (its own salesperson, else the customer's effective rep today).
  */
 function selectSql(where = '', order = 'ORDER BY x.deposit_date ASC, x.id DESC') {
+  // a cheque follows its customer: if the customer's rep is out of scope, the
+  // cheque is out of scope too (even when the cheque pins a visible rep itself)
+  const scope = attribution.customerScopeFilter('c');
   return `
     SELECT x.*, s.name AS rep_name
       FROM (
@@ -77,6 +81,7 @@ function selectSql(where = '', order = 'ORDER BY x.deposit_date ASC, x.id DESC')
                COALESCE(ch.salesperson_id, ${customerRepIdExpr('c')}) AS rep_id
           FROM cheques ch
           JOIN customers c ON c.zoho_contact_id = ch.customer_id
+         WHERE ${scope.sql}
       ) x
       LEFT JOIN salespersons s ON s.zoho_salesperson_id = x.rep_id
       ${where}
@@ -92,7 +97,8 @@ function decorate(row, today) {
 }
 
 function getCheque(id, { now = new Date() } = {}) {
-  const row = getDb().prepare(selectSql('WHERE x.id = @id', '')).get({ id: Number(id) });
+  const scope = attribution.customerScopeFilter('c');
+  const row = getDb().prepare(selectSql('WHERE x.id = @id', '')).get({ id: Number(id), ...scope.params });
   return decorate(row, todayIso(now));
 }
 
@@ -107,7 +113,7 @@ function listCheques({ status = [], dueBefore = null, dueAfter = null, customer 
   const db = getDb();
   const today = todayIso(now);
   const where = [];
-  const params = { limit };
+  const params = { limit, ...attribution.customerScopeFilter('c').params };
 
   const statuses = (Array.isArray(status) ? status : [status]).filter((s) => STATUSES.includes(s));
   // safe to inline: every value is checked against the whitelist above
@@ -147,7 +153,10 @@ function listCheques({ status = [], dueBefore = null, dueAfter = null, customer 
 
 /** Register-wide counts per status, independent of the current filter. */
 function statusCounts() {
-  const rows = getDb().prepare('SELECT status, COUNT(*) AS n FROM cheques GROUP BY status').all();
+  const scope = attribution.customerIdScopeFilter('ch.customer_id');
+  const rows = getDb()
+    .prepare(`SELECT ch.status AS status, COUNT(*) AS n FROM cheques ch WHERE ${scope.sql} GROUP BY ch.status`)
+    .all(scope.params);
   const out = Object.fromEntries(STATUSES.map((s) => [s, 0]));
   for (const r of rows) out[r.status] = r.n;
   return out;
@@ -162,7 +171,7 @@ function chequesDueInDays(days = 0, { now = new Date() } = {}) {
   const target = addDays(today, days);
   return getDb()
     .prepare(selectSql("WHERE x.status = 'pending' AND x.deposit_date = @target", 'ORDER BY x.customer_name ASC, x.id ASC'))
-    .all({ target })
+    .all({ target, ...attribution.customerScopeFilter('c').params })
     .map((r) => decorate(r, today));
 }
 
@@ -173,23 +182,29 @@ function chequeSummary({ now = new Date(), horizonDays = 7 } = {}) {
   const horizon = addDays(today, horizonDays);
   const lead = leadDays();
 
+  const scope = attribution.customerIdScopeFilter('ch.customer_id');
   const pending = db
-    .prepare("SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount FROM cheques WHERE status = 'pending'")
-    .get();
+    .prepare(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(ch.amount), 0) AS amount
+         FROM cheques ch WHERE ch.status = 'pending' AND ${scope.sql}`
+    )
+    .get(scope.params);
   const next = db
     .prepare(
-      `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount
-         FROM cheques
-        WHERE status = 'pending' AND deposit_date >= @today AND deposit_date <= @horizon`
+      `SELECT COUNT(*) AS count, COALESCE(SUM(ch.amount), 0) AS amount
+         FROM cheques ch
+        WHERE ch.status = 'pending' AND ch.deposit_date >= @today AND ch.deposit_date <= @horizon
+          AND ${scope.sql}`
     )
-    .get({ today, horizon });
+    .get({ today, horizon, ...scope.params });
   const overdue = db
     .prepare(
-      `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount
-         FROM cheques
-        WHERE status = 'pending' AND deposit_date IS NOT NULL AND deposit_date < @today`
+      `SELECT COUNT(*) AS count, COALESCE(SUM(ch.amount), 0) AS amount
+         FROM cheques ch
+        WHERE ch.status = 'pending' AND ch.deposit_date IS NOT NULL AND ch.deposit_date < @today
+          AND ${scope.sql}`
     )
-    .get({ today });
+    .get({ today, ...scope.params });
 
   return {
     pending: { count: Number(pending.count || 0), amount: pending.amount || 0 },
@@ -206,7 +221,7 @@ function chequeSummary({ now = new Date(), horizonDays = 7 } = {}) {
 
 function requireCustomer(customerId) {
   const row = getDb().prepare('SELECT zoho_contact_id FROM customers WHERE zoho_contact_id = ?').get(customerId);
-  if (!row) throw httpError(404, 'customer not found');
+  if (!row || !attribution.isCustomerVisible(customerId)) throw httpError(404, 'customer not found');
   return row;
 }
 
@@ -268,7 +283,10 @@ const PATCHABLE = [
 function updateCheque(id, patch, { now = new Date() } = {}) {
   const db = getDb();
   const existing = db.prepare('SELECT * FROM cheques WHERE id = ?').get(Number(id));
-  if (!existing) throw httpError(404, 'cheque not found');
+  // out of scope reads as "not there", on writes as much as on reads
+  if (!existing || !attribution.isCustomerVisible(existing.customer_id)) {
+    throw httpError(404, 'cheque not found');
+  }
 
   const next = { ...existing };
   const incoming = { ...patch };
@@ -304,6 +322,10 @@ function updateCheque(id, patch, { now = new Date() } = {}) {
 }
 
 function deleteCheque(id) {
+  const existing = getDb().prepare('SELECT customer_id FROM cheques WHERE id = ?').get(Number(id));
+  if (!existing || !attribution.isCustomerVisible(existing.customer_id)) {
+    throw httpError(404, 'cheque not found');
+  }
   const info = getDb().prepare('DELETE FROM cheques WHERE id = ?').run(Number(id));
   if (!info.changes) throw httpError(404, 'cheque not found');
   return { deleted: Number(id) };

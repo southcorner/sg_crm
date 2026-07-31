@@ -15,7 +15,8 @@
  */
 
 const { getDb } = require('../db/connection');
-const { customerRepIdExpr, currentRep, todayIso } = require('./attribution');
+const attribution = require('./attribution');
+const { customerRepIdExpr, currentRep, todayIso } = attribution;
 
 const STATUSES = ['open', 'done', 'dropped'];
 
@@ -33,7 +34,14 @@ function currentMonth(now = new Date()) {
 // reads
 // ---------------------------------------------------------------------------
 
-const SELECT = `
+/**
+ * Built per call, not once at module load: the global rep visibility scope can
+ * change between requests. A plan row for a hidden rep's customer is hidden,
+ * even when the row itself pins a visible rep.
+ */
+function selectSql() {
+  const scope = attribution.customerScopeFilter('c');
+  return `
   SELECT x.*, s.name AS rep_name
     FROM (
       SELECT f.id, f.month, f.customer_id, f.note, f.status, f.created_at, f.updated_at,
@@ -48,20 +56,29 @@ const SELECT = `
              (f.salesperson_id IS NOT NULL) AS rep_pinned
         FROM focus_plans f
         JOIN customers c ON c.zoho_contact_id = f.customer_id
+       WHERE ${scope.sql}
     ) x
     LEFT JOIN salespersons s ON s.zoho_salesperson_id = x.salesperson_id`;
+}
 
 function getFocus(id) {
-  const row = getDb().prepare(`${SELECT} WHERE x.id = ?`).get(Number(id));
+  const scope = attribution.customerScopeFilter('c');
+  const row = getDb()
+    .prepare(`${selectSql()} WHERE x.id = @id`)
+    .get({ id: Number(id), ...scope.params });
   return row ? { ...row, rep_pinned: Boolean(row.rep_pinned) } : null;
 }
 
 /** Every plan row for a month, plus the open/done tallies the header shows. */
 function listFocus(month, { now = new Date() } = {}) {
   const m = month || currentMonth(now);
+  const scope = attribution.customerScopeFilter('c');
   const rows = getDb()
-    .prepare(`${SELECT} WHERE x.month = ? ORDER BY x.status ASC, x.outstanding_receivable DESC, x.customer_name ASC`)
-    .all(m)
+    .prepare(
+      `${selectSql()} WHERE x.month = @month
+        ORDER BY x.status ASC, x.outstanding_receivable DESC, x.customer_name ASC`
+    )
+    .all({ month: m, ...scope.params })
     .map((r) => ({ ...r, rep_pinned: Boolean(r.rep_pinned) }));
 
   const counts = { total: rows.length, open: 0, done: 0, dropped: 0 };
@@ -78,9 +95,15 @@ function listFocus(month, { now = new Date() } = {}) {
 /** Dashboard tile: open items in the given (default: current) month. */
 function openFocusCount(month, { now = new Date() } = {}) {
   const m = month || currentMonth(now);
+  const scope = attribution.customerIdScopeFilter('f.customer_id');
   const row = getDb()
-    .prepare("SELECT COUNT(*) AS open, (SELECT COUNT(*) FROM focus_plans WHERE month = ?) AS total FROM focus_plans WHERE month = ? AND status = 'open'")
-    .get(m, m);
+    .prepare(
+      `SELECT COUNT(*) AS open,
+              (SELECT COUNT(*) FROM focus_plans f WHERE f.month = @month AND ${scope.sql}) AS total
+         FROM focus_plans f
+        WHERE f.month = @month AND f.status = 'open' AND ${scope.sql}`
+    )
+    .get({ month: m, ...scope.params });
   return { month: m, open: Number(row.open || 0), total: Number(row.total || 0) };
 }
 
@@ -103,7 +126,7 @@ function createFocus({ month, customer_id: customerId, salesperson_id: salespers
   const m = month || currentMonth(now);
 
   const customer = db.prepare('SELECT zoho_contact_id FROM customers WHERE zoho_contact_id = ?').get(customerId);
-  if (!customer) throw httpError(404, 'customer not found');
+  if (!customer || !attribution.isCustomerVisible(customerId)) throw httpError(404, 'customer not found');
 
   let rep = salespersonId === undefined || salespersonId === null || salespersonId === '' ? defaultRep(customerId) : salespersonId;
   if (rep) {
@@ -136,7 +159,9 @@ function createFocus({ month, customer_id: customerId, salesperson_id: salespers
 function updateFocus(id, patch) {
   const db = getDb();
   const existing = db.prepare('SELECT * FROM focus_plans WHERE id = ?').get(Number(id));
-  if (!existing) throw httpError(404, 'focus item not found');
+  if (!existing || !attribution.isCustomerVisible(existing.customer_id)) {
+    throw httpError(404, 'focus item not found');
+  }
 
   const next = {
     note: patch.note !== undefined ? patch.note || null : existing.note,
@@ -162,6 +187,10 @@ function updateFocus(id, patch) {
 }
 
 function deleteFocus(id) {
+  const existing = getDb().prepare('SELECT customer_id FROM focus_plans WHERE id = ?').get(Number(id));
+  if (!existing || !attribution.isCustomerVisible(existing.customer_id)) {
+    throw httpError(404, 'focus item not found');
+  }
   const info = getDb().prepare('DELETE FROM focus_plans WHERE id = ?').run(Number(id));
   if (!info.changes) throw httpError(404, 'focus item not found');
   return { deleted: Number(id) };

@@ -6,6 +6,7 @@ const express = require('express');
 const { z } = require('zod');
 const { getDb } = require('../db/connection');
 const { parsePaging, listResponse, route, sendError, likeTerm, sortColumn, sortDir } = require('./util');
+const attribution = require('../services/attribution');
 
 const router = express.Router();
 
@@ -67,6 +68,13 @@ router.get(
       params.search = likeTerm(q.search);
     }
 
+    // a payment belongs to whoever owns the customer it came from
+    const scope = attribution.customerIdScopeFilter('p.customer_id');
+    if (scope.active) {
+      where.push(scope.sql);
+      Object.assign(params, scope.params);
+    }
+
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const orderCol = sortColumn(q.sort, SORTS, 'p.payment_date');
     const dir = sortDir(q.dir, 'DESC');
@@ -99,10 +107,11 @@ router.get(
 
     const modes = db
       .prepare(
-        `SELECT payment_mode AS mode, COUNT(*) AS n FROM payments
-          WHERE payment_mode IS NOT NULL GROUP BY payment_mode ORDER BY n DESC`
+        `SELECT p.payment_mode AS mode, COUNT(*) AS n FROM payments p
+          WHERE p.payment_mode IS NOT NULL AND ${scope.sql}
+          GROUP BY p.payment_mode ORDER BY n DESC`
       )
-      .all();
+      .all(scope.params);
 
     return res.json({ ...listResponse(rows, agg.n, paging), totals: { amount: agg.total }, modes });
   })

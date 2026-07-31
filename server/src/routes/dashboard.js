@@ -18,6 +18,7 @@ const dormant = require('../services/dormant');
 const focus = require('../services/focus');
 const reminders = require('../services/reminders/engine');
 const whatsapp = require('../services/reminders/whatsapp');
+const attribution = require('../services/attribution');
 
 const router = express.Router();
 
@@ -26,79 +27,94 @@ router.get(
   route((_req, res) => {
     const db = getDb();
 
+    // Every tile below is filtered to the visible reps (unattributed always
+    // counts). `cust` scopes rows that hang off a customer, `inv` scopes rows
+    // that hang off an invoice's own effective rep — same helper, two anchors.
+    const cust = attribution.customerScopeFilter('c');
+    const inv = attribution.invoiceScopeFilter('i');
+
     const customers = db
       .prepare(
         `SELECT COUNT(*) AS total,
-                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
-                SUM(CASE WHEN outstanding_receivable > 0 THEN 1 ELSE 0 END) AS with_outstanding
-           FROM customers`
+                SUM(CASE WHEN c.status = 'active' THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN c.outstanding_receivable > 0 THEN 1 ELSE 0 END) AS with_outstanding
+           FROM customers c
+          WHERE ${cust.sql}`
       )
-      .get();
+      .get(cust.params);
 
     const mtd = db
       .prepare(
-        `SELECT COUNT(*) AS count, COALESCE(SUM(total), 0) AS amount
-           FROM invoices
-          WHERE status <> 'void'
-            AND invoice_date >= date('now', 'start of month')
-            AND invoice_date <= date('now')`
+        `SELECT COUNT(*) AS count, COALESCE(SUM(i.total), 0) AS amount
+           FROM invoices i
+          WHERE i.status <> 'void'
+            AND i.invoice_date >= date('now', 'start of month')
+            AND i.invoice_date <= date('now')
+            AND ${inv.sql}`
       )
-      .get();
+      .get(inv.params);
 
     const lastMonth = db
       .prepare(
-        `SELECT COUNT(*) AS count, COALESCE(SUM(total), 0) AS amount
-           FROM invoices
-          WHERE status <> 'void'
-            AND invoice_date >= date('now', 'start of month', '-1 month')
-            AND invoice_date < date('now', 'start of month')`
+        `SELECT COUNT(*) AS count, COALESCE(SUM(i.total), 0) AS amount
+           FROM invoices i
+          WHERE i.status <> 'void'
+            AND i.invoice_date >= date('now', 'start of month', '-1 month')
+            AND i.invoice_date < date('now', 'start of month')
+            AND ${inv.sql}`
       )
-      .get();
+      .get(inv.params);
 
     const outstanding = db
       .prepare(
-        `SELECT COALESCE(SUM(balance), 0) AS amount, COUNT(*) AS count
-           FROM invoices
-          WHERE balance > 0 AND status <> 'void' AND status <> 'draft'`
+        `SELECT COALESCE(SUM(i.balance), 0) AS amount, COUNT(*) AS count
+           FROM invoices i
+          WHERE i.balance > 0 AND i.status <> 'void' AND i.status <> 'draft'
+            AND ${inv.sql}`
       )
-      .get();
+      .get(inv.params);
 
     const overdue = db
       .prepare(
-        `SELECT COUNT(*) AS count, COALESCE(SUM(balance), 0) AS amount
-           FROM invoices
-          WHERE balance > 0 AND status <> 'void' AND status <> 'draft'
-            AND due_date IS NOT NULL AND due_date < date('now')`
+        `SELECT COUNT(*) AS count, COALESCE(SUM(i.balance), 0) AS amount
+           FROM invoices i
+          WHERE i.balance > 0 AND i.status <> 'void' AND i.status <> 'draft'
+            AND i.due_date IS NOT NULL AND i.due_date < date('now')
+            AND ${inv.sql}`
       )
-      .get();
+      .get(inv.params);
 
+    const payScope = attribution.customerIdScopeFilter('p.customer_id');
     const paymentsMtd = db
       .prepare(
-        `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amount
-           FROM payments
-          WHERE payment_date >= date('now', 'start of month') AND payment_date <= date('now')`
+        `SELECT COUNT(*) AS count, COALESCE(SUM(p.amount), 0) AS amount
+           FROM payments p
+          WHERE p.payment_date >= date('now', 'start of month')
+            AND p.payment_date <= date('now')
+            AND ${payScope.sql}`
       )
-      .get();
+      .get(payScope.params);
 
     const topOutstanding = db
       .prepare(
-        `SELECT zoho_contact_id AS id, contact_name, outstanding_receivable, last_invoice_date
-           FROM customers
-          WHERE outstanding_receivable > 0
-          ORDER BY outstanding_receivable DESC
+        `SELECT c.zoho_contact_id AS id, c.contact_name, c.outstanding_receivable, c.last_invoice_date
+           FROM customers c
+          WHERE c.outstanding_receivable > 0 AND ${cust.sql}
+          ORDER BY c.outstanding_receivable DESC
           LIMIT 5`
       )
-      .all();
+      .all(cust.params);
 
     const recentInvoices = db
       .prepare(
-        `SELECT zoho_invoice_id AS id, invoice_number, customer_name, invoice_date, total, balance, status
-           FROM invoices
-          WHERE status <> 'void'
-          ORDER BY invoice_date DESC, invoice_number DESC
+        `SELECT i.zoho_invoice_id AS id, i.invoice_number, i.customer_name, i.invoice_date,
+                i.total, i.balance, i.status
+           FROM invoices i
+          WHERE i.status <> 'void' AND ${inv.sql}
+          ORDER BY i.invoice_date DESC, i.invoice_number DESC
           LIMIT 5`
       )
-      .all();
+      .all(inv.params);
 
     const syncStatus = sync.getSyncStatus();
 
@@ -142,6 +158,9 @@ router.get(
       // phase 5 — session state for the "scan the QR" banner. The QR itself is
       // deliberately left out: it belongs on the Settings page, not here.
       whatsapp: whatsapp.getStatus({ includeQr: false }),
+      // so the UI can say "showing X of Y reps" instead of the admin reading
+      // a filtered dashboard as missing data
+      repScope: attribution.repScopeSummary(),
       sync: {
         running: syncStatus.running,
         connected: syncStatus.connected,

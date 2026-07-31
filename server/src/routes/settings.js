@@ -20,13 +20,28 @@ const { z } = require('zod');
 const { route, asyncRoute, sendError } = require('./util');
 const config = require('../config');
 const email = require('../services/reminders/email');
+const attribution = require('../services/attribution');
 const cronJobs = require('../jobs/cron');
 const logger = require('../logger');
 
 const router = express.Router();
 
+/**
+ * The global rep visibility scope: an array of zoho_salesperson_ids, or null for
+ * "every rep". Ids are constrained to a conservative charset because they are
+ * spliced into IN-lists as bound parameters all over the app — nothing exotic
+ * has any business being in a Zoho id.
+ */
+const visibleRepIdsSchema = z
+  .array(z.string().trim().regex(attribution.REP_ID_RE, 'not a valid salesperson id'))
+  .max(500)
+  .nullable()
+  .transform((ids) => (ids === null ? null : [...new Set(ids)]));
+
 /** key → zod schema. Anything not listed here is neither read nor written. */
 const EDITABLE = {
+  // global rep visibility scope
+  visible_rep_ids: visibleRepIdsSchema,
   // phase 1 — Zoho backfill window (0 = every invoice, however old)
   line_item_backfill_months: z.coerce.number().int().min(0).max(120),
   // phase 3 — rule windows
@@ -48,6 +63,8 @@ const EDITABLE = {
 
 /** Written but never returned. */
 const SECRET_KEYS = new Set(['smtp_pass']);
+/** Keys whose null is meaningful and must survive the read (not become ''). */
+const NULLABLE_KEYS = new Set(['visible_rep_ids']);
 const SMTP_KEYS = Object.keys(EDITABLE).filter((k) => k.startsWith('smtp_'));
 
 const putSchema = z
@@ -60,6 +77,10 @@ function readAll() {
   const out = {};
   for (const key of Object.keys(EDITABLE)) {
     if (SECRET_KEYS.has(key)) continue;
+    if (NULLABLE_KEYS.has(key)) {
+      out[key] = all[key] === undefined ? (config.SETTING_DEFAULTS[key] ?? null) : all[key];
+      continue;
+    }
     out[key] = all[key] ?? config.SETTING_DEFAULTS[key] ?? '';
   }
   out.smtp_pass_set = Boolean(all.smtp_pass || config.SMTP_PASS);
@@ -72,6 +93,7 @@ function payload() {
     editable: Object.keys(EDITABLE).filter((k) => !SECRET_KEYS.has(k)),
     smtp: email.status(),
     cron: cronJobs.getStatus(),
+    repScope: attribution.repScopeSummary(),
   };
 }
 

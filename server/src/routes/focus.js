@@ -43,7 +43,10 @@ router.get(
   route((req, res) => {
     const parsed = getSchema.safeParse(req.query || {});
     if (!parsed.success) return sendError(res, parsed.error);
-    return res.json({ ...focus.listFocus(parsed.data.month), reps: attribution.listReps({ includeInactive: false }) });
+    return res.json({
+      ...focus.listFocus(parsed.data.month),
+      reps: attribution.listReps({ includeInactive: false, visibleOnly: true }),
+    });
   })
 );
 

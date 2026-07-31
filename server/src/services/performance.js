@@ -20,7 +20,18 @@
  */
 
 const { getDb } = require('../db/connection');
-const { invoiceRepCte } = require('./attribution');
+const attribution = require('./attribution');
+const { invoiceRepCte } = attribution;
+
+/**
+ * Parameters for the global rep scope baked into invoiceRepCte / lineBrandCte /
+ * pendingLineItemInvoices. Every statement in this file that uses one of those
+ * must spread this into its bindings; it is `{}` when the scope is off, so
+ * spreading is always safe.
+ */
+function scopeParams() {
+  return attribution.invoiceScopeFilter('i').params;
+}
 
 // ---------------------------------------------------------------------------
 // month helpers
@@ -47,8 +58,13 @@ function monthList(endMonth, n) {
 // SQL fragments
 // ---------------------------------------------------------------------------
 
-/** Line items with their brand and pro-rata share of the invoice total. */
+/**
+ * Line items with their brand and pro-rata share of the invoice total.
+ * Carries the global rep scope on its parent invoice, exactly like
+ * invoiceRepCte — bind scopeParams() alongside.
+ */
 function lineBrandCte({ where = '', name = 'line_brand' } = {}) {
+  const scope = attribution.invoiceScopeFilter('inv');
   return `${name} AS (
     SELECT li.invoice_id,
            li.item_id,
@@ -67,23 +83,26 @@ function lineBrandCte({ where = '', name = 'line_brand' } = {}) {
       LEFT JOIN item_brand_map m ON m.item_id = li.item_id
      WHERE inv.status <> 'void'
        AND inv.invoice_date IS NOT NULL
+       AND ${scope.sql}
        ${where ? `AND ${where}` : ''}
   )`;
 }
 
 const NO_LINE_ITEMS = `NOT EXISTS (SELECT 1 FROM invoice_line_items li WHERE li.invoice_id = i.zoho_invoice_id)`;
 
-/** Non-void invoices in a window that have no line items yet. */
+/** Non-void invoices in a window that have no line items yet (scoped). */
 function pendingLineItemInvoices({ where = '', params = {} } = {}) {
   const db = getDb();
+  const scope = attribution.invoiceScopeFilter('i');
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n, COALESCE(SUM(i.total), 0) AS amount
          FROM invoices i
         WHERE i.status <> 'void' AND i.invoice_date IS NOT NULL AND ${NO_LINE_ITEMS}
+          AND ${scope.sql}
           ${where ? `AND ${where}` : ''}`
     )
-    .get(params);
+    .get({ ...params, ...scope.params });
   return { count: row.n, amount: row.amount };
 }
 
@@ -121,7 +140,7 @@ const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 function summary(month) {
   const db = getDb();
   const m = month || currentMonth();
-  const params = { month: m };
+  const params = { month: m, ...scopeParams() };
 
   const repRows = db
     .prepare(
@@ -143,9 +162,11 @@ function summary(month) {
     )
     .all(params);
 
+  // a hidden rep's target must not conjure a row for them in a scoped summary
   const targetRows = db
     .prepare('SELECT salesperson_id, brand_id, target_amount FROM targets WHERE month = ?')
-    .all(m);
+    .all(m)
+    .filter((t) => attribution.isRepVisible(t.salesperson_id));
 
   const reps = repDirectory();
   const brands = brandDirectory();
@@ -241,7 +262,7 @@ function mom({ rep = null, months = 12, brand = null, endMonth = null } = {}) {
   const list = monthList(endMonth, months);
   const from = list[0];
   const to = list[list.length - 1];
-  const params = { from, to };
+  const params = { from, to, ...scopeParams() };
 
   const window = 'substr(i.invoice_date, 1, 7) BETWEEN @from AND @to';
   const brandFilter = brand === 'none' ? 'lb.brand_id IS NULL' : brand ? 'lb.brand_id = @brand' : null;
@@ -327,7 +348,7 @@ function mom({ rep = null, months = 12, brand = null, endMonth = null } = {}) {
 /** Line-item level drill-down: item, quantity, revenue. */
 function products({ rep = null, customer = null, brand = null, month = null, months = 12, endMonth = null, limit = 200 } = {}) {
   const db = getDb();
-  const params = {};
+  const params = { ...scopeParams() };
   const invoiceWhere = [];
   const lineWhere = [];
 
@@ -385,10 +406,13 @@ function products({ rep = null, customer = null, brand = null, month = null, mon
     )
     .all(params);
 
+  // pendingLineItemInvoices only knows the invoice-window clause, so strip the
+  // params that belong to the outer query (it re-adds the scope itself)
   const pendingParams = { ...params };
   delete pendingParams.limit;
   delete pendingParams.rep;
   delete pendingParams.brand;
+  for (const key of Object.keys(scopeParams())) delete pendingParams[key];
   const pending = pendingLineItemInvoices({ where: invoiceWhere.join(' AND '), params: pendingParams });
 
   return {
@@ -421,7 +445,7 @@ function products({ rep = null, customer = null, brand = null, month = null, mon
 function brandRollup({ months = 6, endMonth = null, rep = null } = {}) {
   const db = getDb();
   const list = monthList(endMonth, months);
-  const params = { from: list[0], to: list[list.length - 1] };
+  const params = { from: list[0], to: list[list.length - 1], ...scopeParams() };
   if (rep) params.rep = rep;
 
   const rows = db
@@ -457,16 +481,18 @@ function brandRollup({ months = 6, endMonth = null, rep = null } = {}) {
     return point;
   });
 
+  const pendingScope = attribution.invoiceScopeFilter('i');
   const pendingByMonth = db
     .prepare(
       `SELECT substr(i.invoice_date, 1, 7) AS month, COUNT(*) AS n, COALESCE(SUM(i.total), 0) AS amount
          FROM invoices i
         WHERE i.status <> 'void' AND i.invoice_date IS NOT NULL AND ${NO_LINE_ITEMS}
           AND substr(i.invoice_date, 1, 7) BETWEEN @from AND @to
+          AND ${pendingScope.sql}
         GROUP BY month
         ORDER BY month`
     )
-    .all({ from: params.from, to: params.to });
+    .all({ from: params.from, to: params.to, ...pendingScope.params });
 
   const pendingTotal = pendingByMonth.reduce((s, r) => s + r.n, 0);
 
@@ -508,14 +534,16 @@ function mtdBrands({ now = new Date() } = {}) {
 function getTargets(month) {
   const db = getDb();
   const m = month || currentMonth();
+  // the grid only offers reps the CRM is operating on — you cannot set a target
+  // for someone whose sales you cannot see
   const rows = db
     .prepare('SELECT id, salesperson_id, month, brand_id, target_amount, note FROM targets WHERE month = ?')
-    .all(m);
+    .all(m)
+    .filter((r) => attribution.isRepVisible(r.salesperson_id));
 
-  const reps = db
-    .prepare('SELECT zoho_salesperson_id AS id, name, is_active FROM salespersons ORDER BY is_active DESC, name')
-    .all()
-    .map((r) => ({ ...r, is_active: Boolean(r.is_active) }));
+  const reps = attribution
+    .listReps({ visibleOnly: true })
+    .map((r) => ({ id: r.id, name: r.name, is_active: r.is_active }));
   const brands = db
     .prepare('SELECT id, name FROM brands WHERE is_active = 1 ORDER BY sort_order, name')
     .all();
@@ -546,6 +574,14 @@ function upsertTargets(month, cells) {
   for (const cell of cells) {
     if (!knownReps.has(cell.salesperson_id)) {
       const err = new Error(`unknown salesperson_id ${cell.salesperson_id}`);
+      err.status = 400;
+      throw err;
+    }
+    if (!attribution.isRepVisible(cell.salesperson_id)) {
+      const err = new Error(
+        `salesperson ${cell.salesperson_id} is hidden by the current rep visibility scope — ` +
+          'make them visible on the Reps page before setting a target'
+      );
       err.status = 400;
       throw err;
     }

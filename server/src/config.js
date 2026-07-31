@@ -107,6 +107,10 @@ const SETTING_DEFAULTS = {
   overdue_min_amount: 0,
   overdue_resend_days: 7,
   zoho_daily_call_budget: 2000,
+  // Global rep visibility scope (services/attribution.js). null = every rep is
+  // visible; an array of zoho_salesperson_ids narrows the whole CRM to them.
+  // Unattributed data is visible either way.
+  visible_rep_ids: null,
   // Only invoices dated within this many months get their line items pulled
   // (one API call each). 0 = no limit. Widening it re-queues older invoices.
   line_item_backfill_months: 6,

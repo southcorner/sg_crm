@@ -22,7 +22,8 @@
 
 const { getDb } = require('../db/connection');
 const config = require('../config');
-const { customerRepIdExpr, todayIso } = require('./attribution');
+const attribution = require('./attribution');
+const { customerRepIdExpr, todayIso } = attribution;
 
 const DEFAULT_MONTHS = 3;
 const MAX_MONTHS = 120;
@@ -71,6 +72,10 @@ function listDormant({ months: monthsOverride, includeInactive = false, now = ne
   const threshold = thresholdDate(months, { now });
   const month = today.slice(0, 7);
 
+  // global rep visibility scope: a hidden rep's customers are not "dormant
+  // customers nobody is chasing" — they are simply not this CRM's problem
+  const scope = attribution.customerScopeFilter('c');
+
   const rows = db
     .prepare(
       `SELECT x.*, s.name AS effective_rep_name
@@ -101,13 +106,14 @@ function listDormant({ months: monthsOverride, includeInactive = false, now = ne
                     GROUP BY customer_id) li
                ON li.customer_id = c.zoho_contact_id
             WHERE li.last_invoice_date < @threshold
+              AND ${scope.sql}
               ${includeInactive ? '' : "AND c.status = 'active'"}
          ) x
          LEFT JOIN salespersons s ON s.zoho_salesperson_id = x.effective_rep_id
         ORDER BY x.outstanding_receivable DESC, x.last_invoice_date ASC, x.contact_name ASC
         LIMIT @limit`
     )
-    .all({ threshold, month, limit });
+    .all({ threshold, month, limit, ...scope.params });
 
   return {
     months,
@@ -130,6 +136,7 @@ function dormantCount({ months: monthsOverride, includeInactive = false, now = n
   const months = dormantMonths(monthsOverride);
   const threshold = thresholdDate(months, { now });
 
+  const scope = attribution.customerScopeFilter('c');
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n, COALESCE(SUM(c.outstanding_receivable), 0) AS outstanding
@@ -140,9 +147,10 @@ function dormantCount({ months: monthsOverride, includeInactive = false, now = n
                 GROUP BY customer_id) li
            ON li.customer_id = c.zoho_contact_id
         WHERE li.last_invoice_date < @threshold
+          AND ${scope.sql}
           ${includeInactive ? '' : "AND c.status = 'active'"}`
     )
-    .get({ threshold });
+    .get({ threshold, ...scope.params });
 
   return { months, threshold, count: Number(row.n || 0), outstanding: row.outstanding || 0 };
 }

@@ -65,6 +65,13 @@ router.get(
     }
     if (q.with_outstanding === '1') where.push('c.outstanding_receivable > 0');
 
+    // global rep visibility scope — hidden reps' customers never leave the db
+    const scope = attribution.customerScopeFilter('c');
+    if (scope.active) {
+      where.push(scope.sql);
+      Object.assign(params, scope.params);
+    }
+
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const orderCol = sortColumn(q.sort, SORTS, 'c.contact_name');
     const dir = sortDir(q.dir, orderCol === 'c.contact_name' ? 'ASC' : 'DESC');
@@ -105,7 +112,11 @@ router.get(
       )
       .get(id);
 
-    if (!customer) return res.status(404).json({ error: 'customer not found' });
+    // out of scope reads exactly like "does not exist" — the admin chose to
+    // operate on a subset of reps, so this customer is not part of the CRM
+    if (!customer || !attribution.isCustomerVisible(id)) {
+      return res.status(404).json({ error: 'customer not found' });
+    }
 
     customer.billing_address = safeJson(customer.billing_address_json);
     customer.shipping_address = safeJson(customer.shipping_address_json);
@@ -169,11 +180,14 @@ router.get(
   route((req, res) => {
     const id = String(req.params.id);
     const exists = getDb().prepare('SELECT 1 AS n FROM customers WHERE zoho_contact_id = ?').get(id);
-    if (!exists) return res.status(404).json({ error: 'customer not found' });
+    if (!exists || !attribution.isCustomerVisible(id)) {
+      return res.status(404).json({ error: 'customer not found' });
+    }
     return res.json({
       current: attribution.currentRep(id),
       assignments: attribution.listAssignments(id),
-      reps: attribution.listReps(),
+      // you can only hand an account to a rep the CRM is actually operating on
+      reps: attribution.listReps({ visibleOnly: true }),
     });
   })
 );

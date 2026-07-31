@@ -9,6 +9,7 @@ const express = require('express');
 const { z } = require('zod');
 const { getDb } = require('../db/connection');
 const { parsePaging, listResponse, route, sendError, likeTerm, sortColumn, sortDir } = require('./util');
+const attribution = require('../services/attribution');
 
 const router = express.Router();
 
@@ -96,6 +97,14 @@ router.get(
       params.search = likeTerm(q.search);
     }
 
+    // global rep visibility scope, on the invoice's EFFECTIVE rep (so a
+    // reassigned invoice follows its new owner, not the Zoho salesperson)
+    const scope = attribution.invoiceScopeFilter('i');
+    if (scope.active) {
+      where.push(scope.sql);
+      Object.assign(params, scope.params);
+    }
+
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const orderCol = sortColumn(q.sort, SORTS, 'i.invoice_date');
     const dir = sortDir(q.dir, 'DESC');
@@ -133,19 +142,25 @@ router.get(
   '/meta/filters',
   route((_req, res) => {
     const db = getDb();
+    // the filter bar must describe the data the user can actually see
+    const scope = attribution.invoiceScopeFilter('i');
     const statuses = db
       .prepare(
-        `SELECT status, COUNT(*) AS n FROM invoices WHERE status IS NOT NULL GROUP BY status ORDER BY n DESC`
+        `SELECT i.status AS status, COUNT(*) AS n FROM invoices i
+          WHERE i.status IS NOT NULL AND ${scope.sql}
+          GROUP BY i.status ORDER BY n DESC`
       )
-      .all();
-    const salespersons = db
-      .prepare(
-        `SELECT zoho_salesperson_id AS id, name FROM salespersons ORDER BY name COLLATE NOCASE`
-      )
-      .all();
+      .all(scope.params);
+    const salespersons = attribution
+      .listReps({ visibleOnly: true })
+      .map((r) => ({ id: r.id, name: r.name }))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { sensitivity: 'base' }));
     const range = db
-      .prepare('SELECT MIN(invoice_date) AS min_date, MAX(invoice_date) AS max_date FROM invoices')
-      .get();
+      .prepare(
+        `SELECT MIN(i.invoice_date) AS min_date, MAX(i.invoice_date) AS max_date
+           FROM invoices i WHERE ${scope.sql}`
+      )
+      .get(scope.params);
     res.json({ statuses, salespersons, range });
   })
 );
@@ -166,7 +181,9 @@ router.get(
       )
       .get(id);
 
-    if (!invoice) return res.status(404).json({ error: 'invoice not found' });
+    if (!invoice || !attribution.isInvoiceVisible(id)) {
+      return res.status(404).json({ error: 'invoice not found' });
+    }
 
     const lineItems = db
       .prepare(

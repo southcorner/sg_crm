@@ -41,7 +41,8 @@
 const { getDb } = require('../../db/connection');
 const config = require('../../config');
 const logger = require('../../logger');
-const { todayIso, customerRepIdExpr } = require('../attribution');
+const attribution = require('../attribution');
+const { todayIso, customerRepIdExpr } = attribution;
 const chequeService = require('../cheques');
 const dormantService = require('../dormant');
 const focusService = require('../focus');
@@ -146,6 +147,9 @@ function settingsSnapshot() {
  * flag off is still evaluated (so the preview shows what they *would* get) but
  * run() finds no channel and records a skip rather than sending.
  *
+ * Reps hidden by the global rep visibility scope are dropped entirely: no
+ * digest, no log row, nothing. The admin has said this CRM is not about them.
+ *
  * WhatsApp is listed as a channel for EVERY rep while the feature is switched on,
  * even for reps with no number or the flag off. That is on purpose: the sender
  * then fails with `no_number` / `opted_out` / `session_down` and the reminder log
@@ -155,6 +159,7 @@ function settingsSnapshot() {
  */
 function digestReps() {
   const waEnabled = whatsapp.isEnabled();
+  const visible = attribution.visibleRepIds();
   return getDb()
     .prepare(
       `SELECT zoho_salesperson_id AS id, name, email, crm_email, whatsapp_number,
@@ -164,6 +169,7 @@ function digestReps() {
         ORDER BY name ASC`
     )
     .all()
+    .filter((r) => visible === null || visible.includes(r.id))
     .map((r) => {
       const address = (r.crm_email || r.email || '').trim() || null;
       return {
@@ -198,6 +204,8 @@ function overdueRule(runDate, settings) {
   const db = getDb();
   const cutoff = addDays(runDate, -settings.overdueMinDays);
   const resendOn = addDays(runDate, -settings.overdueResendDays);
+  // routed to the customer's effective rep, so scope on the customer
+  const scope = attribution.customerScopeFilter('c');
 
   const rows = db
     .prepare(
@@ -221,9 +229,10 @@ function overdueRule(runDate, settings) {
           AND i.balance >= @minAmount
           AND i.due_date IS NOT NULL
           AND i.due_date < @cutoff
+          AND ${scope.sql}
         ORDER BY i.due_date ASC, i.invoice_number ASC`
     )
-    .all({ cutoff, minAmount: settings.overdueMinAmount });
+    .all({ cutoff, minAmount: settings.overdueMinAmount, ...scope.params });
 
   const byCustomer = new Map();
   const suppressed = [];

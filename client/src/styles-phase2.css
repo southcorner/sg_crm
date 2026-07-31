@@ -338,3 +338,39 @@
   color: var(--muted);
   line-height: 1.5;
 }
+
+/* ---- global rep visibility scope ---- */
+.scope-indicator {
+  display: block;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #f0d8a8;
+  background: #fdf6e6;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #7a5a12;
+}
+
+.scope-indicator:hover {
+  border-color: #e3c383;
+}
+
+.scope-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #eda100;
+  margin-right: 7px;
+  vertical-align: middle;
+}
+
+.scope-indicator em {
+  display: block;
+  font-style: normal;
+  color: #9a8153;
+  font-size: 11px;
+  margin-top: 2px;
+  padding-left: 14px;
+}

@@ -1,6 +1,6 @@
-import { NavLink, Outlet, useNavigate } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
-import { auth } from '../api.js';
+import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import api, { auth } from '../api.js';
 
 // The full page map from the plan. Pages land phase by phase; until then their
 // route renders a placeholder.
@@ -49,6 +49,7 @@ export default function Layout() {
             </NavLink>
           ))}
         </nav>
+        <RepScopeIndicator />
         <button type="button" className="logout-btn" onClick={handleLogout}>
           Log out
         </button>
@@ -58,5 +59,31 @@ export default function Layout() {
         <Outlet />
       </main>
     </div>
+  );
+}
+
+/**
+ * Standing reminder that the CRM is filtered to a subset of reps, so a short
+ * customer list or a small MTD number is never mistaken for missing data.
+ * Silent when every rep is visible.
+ */
+function RepScopeIndicator() {
+  const { data } = useQuery({
+    queryKey: ['reps'],
+    queryFn: () => api.get('/reps'),
+    staleTime: 60_000,
+  });
+
+  const scope = data?.repScope;
+  if (!scope?.active) return null;
+
+  return (
+    <Link className="scope-indicator" to="/reps" title="Manage which reps the CRM operates on">
+      <span className="scope-dot" />
+      <span>
+        Showing {scope.visible} of {scope.total} reps
+      </span>
+      <em>{scope.hidden} hidden</em>
+    </Link>
   );
 }
