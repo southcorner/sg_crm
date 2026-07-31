@@ -16,6 +16,7 @@ import Reps from './pages/Reps.jsx';
 import FocusPlan from './pages/FocusPlan.jsx';
 import Dormant from './pages/Dormant.jsx';
 import Cheques from './pages/Cheques.jsx';
+import Reminders from './pages/Reminders.jsx';
 import Placeholder from './pages/Placeholder.jsx';
 
 // Routes built so far; everything else in the nav is still a stub.
@@ -32,6 +33,7 @@ const BUILT = new Set([
   '/focus',
   '/dormant',
   '/cheques',
+  '/reminders',
 ]);
 const stubRoutes = NAV_ITEMS.filter((item) => !BUILT.has(item.to));
 
@@ -60,6 +62,7 @@ export default function App() {
         <Route path="/focus" element={<FocusPlan />} />
         <Route path="/dormant" element={<Dormant />} />
         <Route path="/cheques" element={<Cheques />} />
+        <Route path="/reminders" element={<Reminders />} />
         <Route path="/settings" element={<Settings />} />
         {stubRoutes.map((item) => (
           <Route

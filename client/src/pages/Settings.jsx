@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { fmtDateTime, timeAgo, num, titleCase } from '../format.js';
 import { Card, Loading, ErrorBox, StatusChip, ProgressBar, Tabs } from '../components/ui.jsx';
@@ -20,7 +21,7 @@ export default function Settings() {
     <div className="page">
       <header className="page-header">
         <h1>Settings</h1>
-        <p className="page-sub">Zoho connection and sync control. More tabs land in later phases.</p>
+        <p className="page-sub">Zoho connection, sync control and the daily reminder digest. WhatsApp lands in phase 5.</p>
       </header>
 
       <Tabs
@@ -28,8 +29,8 @@ export default function Settings() {
         onChange={setTab}
         tabs={[
           { key: 'zoho', label: 'Zoho' },
-          { key: 'whatsapp', label: 'WhatsApp' },
           { key: 'reminders', label: 'Reminders' },
+          { key: 'whatsapp', label: 'WhatsApp' },
           { key: 'account', label: 'Account' },
         ]}
       />
@@ -51,14 +52,16 @@ export default function Settings() {
 }
 
 /**
- * The reminder rules that already have something behind them: the dormancy
- * window and the cheque lead time. The digest schedule and SMTP land in phase 4
- * and are called out as such rather than shown as dead inputs.
+ * Everything the reminder engine reads: when the digest goes out, the four rule
+ * windows, and the mail server that carries it. Saving an smtp_* key drops the
+ * cached transport server-side and saving the send time re-registers the cron
+ * job, so nothing here needs a restart.
  */
 function RemindersTab() {
   const queryClient = useQueryClient();
   const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings') });
   const [draft, setDraft] = useState(null);
+  const [testTo, setTestTo] = useState('');
 
   const save = useMutation({
     mutationFn: (body) => api.put('/settings', body),
@@ -69,58 +72,114 @@ function RemindersTab() {
       queryClient.invalidateQueries({ queryKey: ['dormant'] });
       queryClient.invalidateQueries({ queryKey: ['cheques'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['reminders-status'] });
     },
   });
+
+  const testEmail = useMutation({ mutationFn: (to) => api.post('/settings/test-email', { to }) });
 
   if (isLoading) return <Loading />;
 
   const settings = data?.settings || {};
+  const smtp = data?.smtp || {};
+  const cron = data?.cron || {};
   const value = (key) => (draft && draft[key] !== undefined ? draft[key] : String(settings[key] ?? ''));
+  const checked = (key) =>
+    draft && draft[key] !== undefined ? Boolean(draft[key]) : Boolean(settings[key]);
   const set = (key, v) => setDraft((d) => ({ ...(d || {}), [key]: v }));
 
   return (
     <>
-      <Card title="Reminder rules">
-        <ErrorBox error={error || save.error} />
+      <ErrorBox error={error || save.error} />
+
+      <Card title="Digest schedule and rules">
+        <p className="muted-text">
+          {cron.started
+            ? `The digest job is registered for ${cron.sendTime}, Monday to Saturday.`
+            : 'Scheduled jobs are not running in this process — digests can still be sent by hand from the Reminders page.'}
+        </p>
         <form
-          className="stack-form"
+          className="stack-form wide"
           onSubmit={(e) => {
             e.preventDefault();
             save.mutate({
+              digest_send_time: value('digest_send_time'),
               dormant_months: Number(value('dormant_months')),
               cheque_lead_days: Number(value('cheque_lead_days')),
+              overdue_min_days: Number(value('overdue_min_days')),
+              overdue_min_amount: Number(value('overdue_min_amount')),
+              overdue_resend_days: Number(value('overdue_resend_days')),
             });
           }}
         >
-          <label>
-            Dormant after (months)
-            <input
-              type="number"
-              min="1"
-              max="120"
-              step="1"
-              value={value('dormant_months')}
-              onChange={(e) => set('dormant_months', e.target.value)}
-            />
-            <span className="muted-text">
-              A customer with no invoice for this many months shows up on the Dormant page and in the digest.
-            </span>
-          </label>
-          <label>
-            Cheque reminder lead time (days)
-            <input
-              type="number"
-              min="0"
-              max="60"
-              step="1"
-              value={value('cheque_lead_days')}
-              onChange={(e) => set('cheque_lead_days', e.target.value)}
-            />
-            <span className="muted-text">
-              A pending cheque is flagged — and once phase 4 lands, its rep reminded — this many days before its
-              deposit date.
-            </span>
-          </label>
+          <div className="settings-grid">
+            <label>
+              Digest send time
+              <input type="time" value={value('digest_send_time')} onChange={(e) => set('digest_send_time', e.target.value)} />
+              <span className="hint">Mon–Sat. Changing this re-registers the job immediately.</span>
+            </label>
+            <label>
+              Overdue after (days past due)
+              <input
+                type="number"
+                min="0"
+                max="365"
+                step="1"
+                value={value('overdue_min_days')}
+                onChange={(e) => set('overdue_min_days', e.target.value)}
+              />
+              <span className="hint">An invoice is chased once its due date is further back than this.</span>
+            </label>
+            <label>
+              Ignore balances under (₹)
+              <input
+                type="number"
+                min="0"
+                step="100"
+                value={value('overdue_min_amount')}
+                onChange={(e) => set('overdue_min_amount', e.target.value)}
+              />
+              <span className="hint">0 = chase everything. Applied per invoice.</span>
+            </label>
+            <label>
+              Re-nag the same invoice after (days)
+              <input
+                type="number"
+                min="1"
+                max="365"
+                step="1"
+                value={value('overdue_resend_days')}
+                onChange={(e) => set('overdue_resend_days', e.target.value)}
+              />
+              <span className="hint">An invoice stays out of the digest for this long after it was last sent.</span>
+            </label>
+            <label>
+              Dormant after (months)
+              <input
+                type="number"
+                min="1"
+                max="120"
+                step="1"
+                value={value('dormant_months')}
+                onChange={(e) => set('dormant_months', e.target.value)}
+              />
+              <span className="hint">
+                Drives the Dormant page and the 😴 section — max 10 per digest, each customer at most once a fortnight.
+              </span>
+            </label>
+            <label>
+              Cheque reminder lead time (days)
+              <input
+                type="number"
+                min="0"
+                max="60"
+                step="1"
+                value={value('cheque_lead_days')}
+                onChange={(e) => set('cheque_lead_days', e.target.value)}
+              />
+              <span className="hint">A pending cheque is announced exactly this many days before its deposit date.</span>
+            </label>
+          </div>
           <div className="form-row">
             <button type="submit" className="btn" disabled={save.isPending || !draft}>
               {save.isPending ? 'Saving…' : 'Save'}
@@ -129,10 +188,122 @@ function RemindersTab() {
           </div>
         </form>
       </Card>
-      <Card title="Digest delivery">
-        <p className="muted-text">
-          The daily digest schedule, SMTP credentials and the overdue-invoice rules land in phase 4.
-        </p>
+
+      <Card
+        title="Mail server (SMTP)"
+        actions={<StatusChip value={smtp.configured ? 'configured' : 'not configured'} tone={smtp.configured ? 'ok' : 'warn'} />}
+      >
+        {smtp.testTransport ? (
+          <p className="muted-text">
+            <strong>SMTP_TRANSPORT={smtp.testTransport}</strong> is set — mail is captured locally instead of being
+            delivered. Unset it in .env for real sending.
+          </p>
+        ) : null}
+        <form
+          className="stack-form wide"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const body = {
+              smtp_host: value('smtp_host'),
+              smtp_port: Number(value('smtp_port')),
+              smtp_secure: checked('smtp_secure'),
+              smtp_user: value('smtp_user'),
+              smtp_from: value('smtp_from'),
+            };
+            if (draft && draft.smtp_pass) body.smtp_pass = draft.smtp_pass;
+            save.mutate(body);
+          }}
+        >
+          <div className="settings-grid">
+            <label>
+              Host
+              <input
+                type="text"
+                autoComplete="off"
+                placeholder="smtp.zoho.in"
+                value={value('smtp_host')}
+                onChange={(e) => set('smtp_host', e.target.value)}
+              />
+            </label>
+            <label>
+              Port
+              <input type="number" min="1" max="65535" value={value('smtp_port')} onChange={(e) => set('smtp_port', e.target.value)} />
+              <span className="hint">465 = implicit TLS, 587 = STARTTLS.</span>
+            </label>
+            <label className="checkbox-field">
+              <input type="checkbox" checked={checked('smtp_secure')} onChange={(e) => set('smtp_secure', e.target.checked)} />
+              Use implicit TLS (port 465)
+            </label>
+            <label>
+              Username
+              <input
+                type="text"
+                autoComplete="off"
+                value={value('smtp_user')}
+                onChange={(e) => set('smtp_user', e.target.value)}
+              />
+            </label>
+            <label>
+              Password
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder={smtp.passSet ? '•••••••• (stored)' : ''}
+                value={(draft && draft.smtp_pass) || ''}
+                onChange={(e) => set('smtp_pass', e.target.value)}
+              />
+              <span className="hint">Write-only — it is never sent back to the browser.</span>
+            </label>
+            <label>
+              From address
+              <input
+                type="text"
+                autoComplete="off"
+                placeholder="SG CRM &lt;crm@example.in&gt;"
+                value={value('smtp_from')}
+                onChange={(e) => set('smtp_from', e.target.value)}
+              />
+            </label>
+          </div>
+          <div className="form-row">
+            <button type="submit" className="btn" disabled={save.isPending || !draft}>
+              {save.isPending ? 'Saving…' : 'Save SMTP settings'}
+            </button>
+          </div>
+        </form>
+
+        <div className="backfill-block">
+          <h3>Send a test email</h3>
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (testTo.trim()) testEmail.mutate(testTo.trim());
+            }}
+          >
+            <input
+              type="email"
+              placeholder="you@example.in"
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              required
+            />
+            <button type="submit" className="btn ghost" disabled={testEmail.isPending}>
+              {testEmail.isPending ? 'Sending…' : 'Send test email'}
+            </button>
+            {testEmail.isError ? <span className="form-error">{testEmail.error.message}</span> : null}
+            {testEmail.isSuccess ? (
+              <span className="form-ok">
+                Sent to {testEmail.data.to}
+                {testEmail.data.messageId ? ` (${testEmail.data.messageId})` : ''}.
+              </span>
+            ) : null}
+          </form>
+          <p className="muted-text">
+            Save the settings first — the test uses whatever is stored. Reps receive their digest at their CRM email,
+            falling back to the address Zoho has; set those on <Link className="link" to="/reps">Reps</Link>.
+          </p>
+        </div>
       </Card>
     </>
   );

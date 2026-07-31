@@ -115,6 +115,8 @@ export default function Dashboard() {
 
       <MtdBrands data={data.mtdBrands} />
 
+      <DigestStatus data={data.reminders} />
+
       <div className="two-col">
         <Card title="Top outstanding customers">
           <div className="table-wrap">
@@ -222,6 +224,87 @@ export default function Dashboard() {
         </div>
       </Card>
     </div>
+  );
+}
+
+const DIGEST_TONE = {
+  sent: 'ok',
+  failed: 'bad',
+  pending: 'info',
+  skipped: 'muted',
+  skipped_dedupe: 'muted',
+  none: 'muted',
+};
+
+const DIGEST_LABEL = {
+  sent: 'Sent',
+  failed: 'Failed',
+  pending: 'In flight',
+  skipped: 'Skipped',
+  skipped_dedupe: 'Deduped',
+  none: 'Nothing to send',
+};
+
+/**
+ * Who actually got their digest. "Nothing to send" is the normal state for a rep
+ * with no overdue, no cheque and no dormant customer — it is deliberately not
+ * shown as a failure.
+ */
+function DigestStatus({ data }) {
+  if (!data) return null;
+  const days = [
+    { key: 'today', label: 'Today', day: data.today },
+    { key: 'yesterday', label: 'Yesterday', day: data.yesterday },
+  ];
+
+  return (
+    <Card
+      title="Digest delivery"
+      actions={
+        <Link className="btn ghost small" to="/reminders">
+          Reminder log
+        </Link>
+      }
+    >
+      <p className="muted-text">Digests go out Mon–Sat at {data.sendTime}.</p>
+      <div className="digest-status">
+        {days.map(({ key, label, day }) => (
+          <div key={key} className="digest-day">
+            <h3>
+              {label} · {fmtDate(day.date)} — {day.sent} sent
+              {day.failed ? `, ${day.failed} failed` : ''}
+              {day.skipped ? `, ${day.skipped} skipped` : ''}
+            </h3>
+            <div className="digest-day-rows">
+              {day.reps.length ? (
+                day.reps.map((rep) => (
+                  <div key={rep.rep_id} className={`digest-rep-row ${rep.status === 'failed' ? 'bad' : ''}`}>
+                    <span className="name" title={rep.email || ''}>
+                      {rep.rep_name}
+                    </span>
+                    {rep.channel ? <span className="when">{rep.channel}</span> : null}
+                    <span className="when">{rep.at ? timeAgo(rep.at) : ''}</span>
+                    <span className={`chip ${DIGEST_TONE[rep.status] || 'muted'}`}>
+                      {DIGEST_LABEL[rep.status] || rep.status}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <p className="muted-text">No active reps configured.</p>
+              )}
+            </div>
+            {day.reps.some((r) => r.error) ? (
+              <div className="banner warn">
+                {day.reps
+                  .filter((r) => r.error)
+                  .map((r) => `${r.rep_name}: ${r.error}`)
+                  .join(' · ')}
+              </div>
+            ) : null}
+          </div>
+        ))}
+      </div>
+    </Card>
   );
 }
 

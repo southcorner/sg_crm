@@ -20,6 +20,7 @@ const repRoutes = require('./reps');
 const focusRoutes = require('./focus');
 const dormantRoutes = require('./dormant');
 const chequeRoutes = require('./cheques');
+const reminderRoutes = require('./reminders');
 const settingsRoutes = require('./settings');
 const config = require('../config');
 
@@ -50,6 +51,10 @@ router.use('/reps', repRoutes);
 router.use('/focus', focusRoutes);
 router.use('/dormant', dormantRoutes);
 router.use('/cheques', chequeRoutes);
+
+// phase 4 — reminder engine, digests, cron
+router.use('/reminders', reminderRoutes);
+
 router.use('/settings', settingsRoutes);
 
 module.exports = router;

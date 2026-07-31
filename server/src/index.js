@@ -20,6 +20,7 @@ const { runMigrations } = require('./db/migrate');
 const { ensureAdminUser } = require('./services/adminUser');
 const { requireAuth } = require('./middleware/auth');
 const apiRoutes = require('./routes');
+const cronJobs = require('./jobs/cron');
 
 function bootstrapDatabase() {
   const db = getDb();
@@ -94,10 +95,14 @@ function start() {
       { port: config.PORT, env: config.NODE_ENV, db: config.DB_PATH },
       'sg-crm server listening'
     );
+    // schedulers live in this process; nothing else may start them
+    const cronStatus = cronJobs.start();
+    logger.info({ cron: cronStatus.started, sendTime: cronStatus.sendTime }, 'cron boot');
   });
 
   const shutdown = (signal) => {
     logger.info({ signal }, 'shutting down');
+    cronJobs.stop();
     server.close(() => {
       closeDb();
       process.exit(0);

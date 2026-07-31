@@ -72,9 +72,17 @@ const SETTING_DEFAULTS = {
   dormant_months: 3,
   cheque_lead_days: 3,
   overdue_min_days: 1,
+  overdue_min_amount: 0,
   overdue_resend_days: 7,
   zoho_daily_call_budget: 2000,
   sync_enabled: false,
+  // SMTP — seeded empty so the settings UI has something to bind to. The
+  // password is deliberately NOT seeded: it is write-only via /api/settings.
+  smtp_host: '',
+  smtp_port: 587,
+  smtp_secure: false,
+  smtp_user: '',
+  smtp_from: '',
 };
 
 function db() {

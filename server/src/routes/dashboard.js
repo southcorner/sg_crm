@@ -16,6 +16,7 @@ const perf = require('../services/performance');
 const cheques = require('../services/cheques');
 const dormant = require('../services/dormant');
 const focus = require('../services/focus');
+const reminders = require('../services/reminders/engine');
 
 const router = express.Router();
 
@@ -135,6 +136,8 @@ router.get(
       recentInvoices,
       // MTD split by brand (line-item derived — see services/performance.js)
       mtdBrands: perf.mtdBrands(),
+      // phase 4 — who got their digest today / yesterday, and on which channel
+      reminders: reminders.digestStatus(),
       sync: {
         running: syncStatus.running,
         connected: syncStatus.connected,

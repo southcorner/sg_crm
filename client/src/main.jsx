@@ -7,6 +7,7 @@ import './styles.css';
 import './styles-data.css';
 import './styles-phase2.css';
 import './styles-phase3.css';
+import './styles-phase4.css';
 
 const queryClient = new QueryClient({
   defaultOptions: {
