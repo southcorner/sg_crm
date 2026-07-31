@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, keepPreviousData } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import {
@@ -23,12 +23,57 @@ function thisMonth() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+/** Columns a first click should sort biggest-first. Must match the API whitelist. */
+const NUMERIC_DRILL_COLUMNS = new Set(['quantity', 'revenue', 'invoices', 'customers']);
+
+const DRILL_COLUMN_LABELS = {
+  name: 'name',
+  sku: 'SKU',
+  brand: 'brand',
+  category: 'category',
+  quantity: 'quantity',
+  revenue: 'revenue',
+  invoices: 'invoice count',
+  customers: 'customer count',
+};
+
+/** "revenue (high to low)" — what the capped list was ranked by. */
+function sortLabel(filters) {
+  const column = DRILL_COLUMN_LABELS[filters?.sort] || 'revenue';
+  const dir = filters?.sort ? filters.dir : 'desc';
+  return `${column} (${dir === 'asc' ? 'low to high' : 'high to low'})`;
+}
+
+/** Sortable drill-down header. Three-state: natural → reversed → default. */
+function DrillHeader({ label, column, sort, dir, onSort, align }) {
+  const active = sort === column;
+  return (
+    <th
+      className={`sortable ${active ? 'active' : ''} ${align === 'right' ? 'right' : ''}`}
+      onClick={() => onSort(column)}
+      title={active ? 'Click to reverse · click again to clear the sort' : `Sort by ${label}`}
+    >
+      {label}
+      <span className="sort-caret">{active ? (dir === 'asc' ? '▲' : '▼') : ''}</span>
+    </th>
+  );
+}
+
 export default function Performance() {
   const [month, setMonth] = useState(thisMonth());
   const [momMonths, setMomMonths] = useState(12);
   const [momBrand, setMomBrand] = useState('');
   const [momRep, setMomRep] = useState('');
-  const [drill, setDrill] = useState({ rep: '', customer: '', brand: '', month: '' });
+  const [drill, setDrill] = useState({ rep: '', customer: '', brand: '', month: '', sort: '', dir: '' });
+
+  // the model search is debounced so a fast typist does not fire a query per
+  // keystroke; `searchInput` drives the box, `search` drives the request
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   const summaryQuery = useQuery({
     queryKey: ['performance', 'summary', month],
@@ -49,7 +94,7 @@ export default function Performance() {
   });
 
   const productQuery = useQuery({
-    queryKey: ['performance', 'products', drill, month],
+    queryKey: ['performance', 'products', drill, month, search],
     queryFn: () =>
       api.get(
         `/performance/products${qs({
@@ -57,6 +102,9 @@ export default function Performance() {
           customer: drill.customer,
           brand: drill.brand,
           month: drill.month || month,
+          search,
+          sort: drill.sort,
+          dir: drill.dir,
         })}`
       ),
     placeholderData: keepPreviousData,
@@ -68,6 +116,20 @@ export default function Performance() {
     queryKey: ['invoices', 'meta', 'filters'],
     queryFn: () => api.get('/invoices/meta/filters'),
   });
+
+  /**
+   * Three-state header click: first sorts the column the way you almost always
+   * want it (biggest first for numbers, A→Z for text), second reverses, third
+   * drops back to the page default of revenue DESC.
+   */
+  function toggleDrillSort(column) {
+    const natural = NUMERIC_DRILL_COLUMNS.has(column) ? 'desc' : 'asc';
+    setDrill((d) => {
+      if (d.sort !== column) return { ...d, sort: column, dir: natural };
+      if (d.dir === natural) return { ...d, sort: column, dir: natural === 'desc' ? 'asc' : 'desc' };
+      return { ...d, sort: '', dir: '' };
+    });
+  }
 
   const summary = summaryQuery.data;
   const brandOptions = (summary?.brands || []).map((b) => ({ value: b.id, label: b.name }));
@@ -374,6 +436,28 @@ export default function Performance() {
         title="Product drill-down"
         actions={
           <div className="filters">
+            <label className="search-field">
+              <span>Model</span>
+              <span className="search-input">
+                <input
+                  type="text"
+                  placeholder="Search name or SKU…"
+                  value={searchInput}
+                  onChange={(e) => setSearchInput(e.target.value)}
+                />
+                {searchInput ? (
+                  <button
+                    type="button"
+                    className="search-clear"
+                    aria-label="Clear model search"
+                    title="Clear"
+                    onClick={() => setSearchInput('')}
+                  >
+                    ×
+                  </button>
+                ) : null}
+              </span>
+            </label>
             <Select label="Rep" value={drill.rep} onChange={(v) => setDrill({ ...drill, rep: v })} options={repOptions} allLabel="All reps" />
             <Select
               label="Brand"
@@ -398,23 +482,47 @@ export default function Performance() {
             from this table.
           </Banner>
         ) : null}
+        {productQuery.data ? (
+          <div className="drill-count">
+            {num(productQuery.data.matched)} model{productQuery.data.matched === 1 ? '' : 's'}
+            {productQuery.data.filters?.search ? (
+              <>
+                {' '}matching “<strong>{productQuery.data.filters.search}</strong>”
+              </>
+            ) : null}
+            {productQuery.data.truncated ? (
+              <> · showing the top {num(productQuery.data.rows.length)} by {sortLabel(productQuery.data.filters)}</>
+            ) : null}
+            {drill.sort ? (
+              <>
+                {' '}·{' '}
+                <button type="button" className="link-button" onClick={() => setDrill({ ...drill, sort: '', dir: '' })}>
+                  clear sort
+                </button>
+              </>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="table-wrap">
           <table className="data-table">
             <thead>
               <tr>
-                <th>Item</th>
-                <th>SKU</th>
-                <th>Brand</th>
-                <th className="right">Qty</th>
-                <th className="right">Invoices</th>
-                <th className="right">Customers</th>
-                <th className="right">Revenue</th>
+                <DrillHeader label="Item" column="name" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} />
+                <DrillHeader label="SKU" column="sku" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} />
+                <DrillHeader label="Brand" column="brand" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} />
+                <DrillHeader label="Qty" column="quantity" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} align="right" />
+                <DrillHeader label="Invoices" column="invoices" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} align="right" />
+                <DrillHeader label="Customers" column="customers" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} align="right" />
+                <DrillHeader label="Revenue" column="revenue" sort={drill.sort} dir={drill.dir} onSort={toggleDrillSort} align="right" />
               </tr>
             </thead>
             <tbody>
               {productQuery.data?.rows?.length ? (
                 productQuery.data.rows.map((r) => (
-                  <tr key={`${r.item_id || r.item_name}-${r.brand_id ?? 'none'}`}>
+                  // group_key is unique per row by construction; the fallback
+                  // only matters for a cached response from an older server
+                  <tr key={`${r.group_key || r.item_id || r.item_name}-${r.brand_id ?? 'none'}`}>
                     <td>{r.item_name || '—'}</td>
                     <td className="mono">{r.sku || '—'}</td>
                     <td>{r.brand_name}</td>
@@ -426,7 +534,11 @@ export default function Performance() {
                 ))
               ) : (
                 <EmptyRow colSpan={7}>
-                  {productQuery.isLoading ? 'Loading…' : 'No line items match these filters.'}
+                  {productQuery.isLoading
+                    ? 'Loading…'
+                    : search
+                      ? `No model matches “${search}” in this window.`
+                      : 'No line items match these filters.'}
                 </EmptyRow>
               )}
             </tbody>

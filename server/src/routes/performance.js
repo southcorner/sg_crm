@@ -3,7 +3,7 @@
 /**
  * GET /api/performance/summary?month=YYYY-MM
  * GET /api/performance/mom?rep=&months=&brand=&end=
- * GET /api/performance/products?rep=&customer=&brand=&month=&months=
+ * GET /api/performance/products?rep=&customer=&brand=&month=&months=&search=&sort=&dir=
  * GET /api/performance/brands?months=&rep=
  */
 
@@ -26,6 +26,15 @@ const momSchema = z.object({
   end: MONTH.optional(),
 });
 
+// whitelisted by the service; an unknown column is a 400, never a raw ORDER BY
+const SORT = z.enum(perf.PRODUCT_SORT_KEYS, {
+  errorMap: () => ({ message: `sort must be one of ${perf.PRODUCT_SORT_KEYS.join(' | ')}` }),
+});
+const DIR = z.preprocess(
+  (v) => (typeof v === 'string' ? v.toLowerCase() : v),
+  z.enum(['asc', 'desc'], { errorMap: () => ({ message: 'dir must be asc or desc' }) })
+);
+
 const productsSchema = z.object({
   rep: z.string().trim().max(64).optional(),
   customer: z.string().trim().max(64).optional(),
@@ -34,6 +43,9 @@ const productsSchema = z.object({
   months: z.coerce.number().int().min(1).max(60).default(12),
   end: MONTH.optional(),
   limit: z.coerce.number().int().min(1).max(1000).default(200),
+  search: z.string().trim().max(120).optional(),
+  sort: SORT.optional(),
+  dir: DIR.optional(),
 });
 
 const brandsSchema = z.object({
@@ -66,7 +78,7 @@ router.get(
   route((req, res) => {
     const parsed = productsSchema.safeParse(req.query || {});
     if (!parsed.success) return sendError(res, parsed.error);
-    const { rep, customer, brand, month, months, end, limit } = parsed.data;
+    const { rep, customer, brand, month, months, end, limit, search, sort, dir } = parsed.data;
     return res.json(
       perf.products({
         rep: rep || null,
@@ -76,6 +88,9 @@ router.get(
         months,
         endMonth: end || null,
         limit,
+        search: search || null,
+        sort: sort || null,
+        dir: dir || null,
       })
     );
   })

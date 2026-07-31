@@ -345,8 +345,53 @@ function mom({ rep = null, months = 12, brand = null, endMonth = null } = {}) {
 // products(filters)
 // ---------------------------------------------------------------------------
 
-/** Line-item level drill-down: item, quantity, revenue. */
-function products({ rep = null, customer = null, brand = null, month = null, months = 12, endMonth = null, limit = 200 } = {}) {
+/**
+ * Sortable columns of the drill-down, keyed by the name the API accepts.
+ * A whitelist, not a passthrough: the value is spliced straight into ORDER BY,
+ * so nothing outside this map can ever reach the SQL. Text sorts are
+ * case-insensitive; NULL skus/categories sort last whichever way you go.
+ */
+const PRODUCT_SORTS = {
+  name: 'item_name COLLATE NOCASE',
+  sku: 'sku COLLATE NOCASE',
+  brand: 'brand_name COLLATE NOCASE',
+  category: 'category_name COLLATE NOCASE',
+  quantity: 'quantity',
+  revenue: 'revenue',
+  invoices: 'invoice_count',
+  customers: 'customer_count',
+};
+
+const PRODUCT_SORT_KEYS = Object.keys(PRODUCT_SORTS);
+const DEFAULT_PRODUCT_ORDER = 'revenue DESC, item_name COLLATE NOCASE ASC';
+
+/**
+ * Escape a user string for use inside a LIKE pattern. The backslash is escaped
+ * FIRST — doing it after % and _ would re-escape the escapes.
+ */
+function likePattern(value) {
+  return `%${String(value).replace(/[\\%_]/g, (m) => `\\${m}`)}%`;
+}
+
+/**
+ * Line-item level drill-down: item, quantity, revenue.
+ *
+ * `search` matches the model name OR its SKU (case-insensitive substring).
+ * `sort`/`dir` order the result IN SQL — the list is capped by `limit`, so
+ * sorting client-side would only reorder whichever slice came back.
+ */
+function products({
+  rep = null,
+  customer = null,
+  brand = null,
+  month = null,
+  months = 12,
+  endMonth = null,
+  limit = 200,
+  search = null,
+  sort = null,
+  dir = null,
+} = {}) {
   const db = getDb();
   const params = { ...scopeParams() };
   const invoiceWhere = [];
@@ -379,15 +424,52 @@ function products({ rep = null, customer = null, brand = null, month = null, mon
     params.brand = Number(brand);
     outer.push('lb.brand_id = @brand');
   }
+  const term = search === null || search === undefined ? '' : String(search).trim();
+  if (term) {
+    params.search = likePattern(term);
+    // WHERE, not HAVING: name and sku are still row-level values here, so
+    // filtering before the grouping is both correct and cheaper
+    outer.push(
+      `(COALESCE(it.name, lb.item_name) LIKE @search ESCAPE '\\'
+        OR COALESCE(it.sku, lb.sku) LIKE @search ESCAPE '\\')`
+    );
+  }
   params.limit = Math.max(1, Math.min(1000, Number(limit) || 200));
+
+  const sortKey = sort && Object.prototype.hasOwnProperty.call(PRODUCT_SORTS, sort) ? sort : null;
+  const direction = String(dir || '').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const orderBy = sortKey
+    ? `${PRODUCT_SORTS[sortKey]} ${direction} NULLS LAST, item_name COLLATE NOCASE ASC`
+    : DEFAULT_PRODUCT_ORDER;
+
+  // shared by the page query and the "how many matched" count
+  const ctes = `${invoiceRepCte({ where: invoiceWhere.join(' AND ') })},
+            ${lineBrandCte({ where: lineWhere.join(' AND ') })}`;
+  /**
+   * One row per model, keyed by item_id — NOT by the line's name. Zoho snapshots
+   * the item name onto each line, so the same item can carry names that differ
+   * invisibly (stray whitespace) between invoices; grouping on the name split
+   * such an item into two identical-looking rows that then collided on the
+   * client's React key. Lines with no item_id at all (ad-hoc) still group by
+   * their name, which is all they have.
+   */
+  const GROUP_KEY = `COALESCE(lb.item_id, '~adhoc~' || COALESCE(lb.item_name, ''))`;
+
+  const selectBody = `
+         FROM line_brand lb
+         JOIN invoice_rep r ON r.invoice_id = lb.invoice_id
+         LEFT JOIN items it ON it.zoho_item_id = lb.item_id
+         LEFT JOIN brands b ON b.id = lb.brand_id
+        ${outer.length ? `WHERE ${outer.join(' AND ')}` : ''}
+        GROUP BY group_key, lb.brand_id`;
 
   const rows = db
     .prepare(
-      `WITH ${invoiceRepCte({ where: invoiceWhere.join(' AND ') })},
-            ${lineBrandCte({ where: lineWhere.join(' AND ') })}
-       SELECT lb.item_id,
-              COALESCE(it.name, lb.item_name) AS item_name,
-              COALESCE(it.sku, lb.sku) AS sku,
+      `WITH ${ctes}
+       SELECT ${GROUP_KEY} AS group_key,
+              lb.item_id,
+              COALESCE(it.name, MIN(lb.item_name)) AS item_name,
+              COALESCE(it.sku, MIN(lb.sku)) AS sku,
               it.category_name,
               lb.brand_id,
               b.name AS brand_name,
@@ -395,16 +477,24 @@ function products({ rep = null, customer = null, brand = null, month = null, mon
               SUM(lb.amount) AS revenue,
               COUNT(DISTINCT lb.invoice_id) AS invoice_count,
               COUNT(DISTINCT r.customer_id) AS customer_count
-         FROM line_brand lb
-         JOIN invoice_rep r ON r.invoice_id = lb.invoice_id
-         LEFT JOIN items it ON it.zoho_item_id = lb.item_id
-         LEFT JOIN brands b ON b.id = lb.brand_id
-        ${outer.length ? `WHERE ${outer.join(' AND ')}` : ''}
-        GROUP BY lb.item_id, item_name, lb.brand_id
-        ORDER BY revenue DESC
+        ${selectBody}
+        ORDER BY ${orderBy}
         LIMIT @limit`
     )
     .all(params);
+
+  // how many models match before the cap, so the UI can say "top 200 of 512"
+  const countParams = { ...params };
+  delete countParams.limit;
+  const matched = db
+    .prepare(
+      `WITH ${ctes}
+       SELECT COUNT(*) AS n FROM (
+         SELECT ${GROUP_KEY} AS group_key, lb.brand_id
+         ${selectBody}
+       )`
+    )
+    .get(countParams).n;
 
   // pendingLineItemInvoices only knows the invoice-window clause, so strip the
   // params that belong to the outer query (it re-adds the scope itself)
@@ -412,6 +502,7 @@ function products({ rep = null, customer = null, brand = null, month = null, mon
   delete pendingParams.limit;
   delete pendingParams.rep;
   delete pendingParams.brand;
+  delete pendingParams.search;
   for (const key of Object.keys(scopeParams())) delete pendingParams[key];
   const pending = pendingLineItemInvoices({ where: invoiceWhere.join(' AND '), params: pendingParams });
 
@@ -427,7 +518,21 @@ function products({ rep = null, customer = null, brand = null, month = null, mon
       quantity: round2(rows.reduce((s, r) => s + r.quantity, 0)),
       items: rows.length,
     },
-    filters: { rep, customer, brand, month: month || null, months: month ? 1 : months },
+    filters: {
+      rep,
+      customer,
+      brand,
+      month: month || null,
+      months: month ? 1 : months,
+      search: term || null,
+      sort: sortKey,
+      dir: sortKey ? direction.toLowerCase() : null,
+    },
+    // `matched` counts every model the filters select; `rows` is the capped
+    // slice, so the UI can honestly say "showing top 200 of 512"
+    matched,
+    limit: params.limit,
+    truncated: matched > rows.length,
     pendingInvoices: pending.count,
     pendingAmount: round2(pending.amount),
   };
@@ -629,6 +734,9 @@ function upsertTargets(month, cells) {
 }
 
 module.exports = {
+  PRODUCT_SORTS,
+  PRODUCT_SORT_KEYS,
+  likePattern,
   currentMonth,
   shiftMonth,
   monthList,
