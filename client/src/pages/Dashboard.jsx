@@ -75,6 +75,44 @@ export default function Dashboard() {
         />
       </div>
 
+      {/* phase 3 — the CRM's own workflow queues */}
+      <div className="kpi-row">
+        <Link className="kpi-link" to="/cheques">
+          <KpiCard
+            label="Pending cheques"
+            value={inr0(k.cheques.pending.amount)}
+            sub={`${num(k.cheques.pending.count)} cheques awaiting deposit${
+              k.cheques.pastDue.count ? ` · ${num(k.cheques.pastDue.count)} past their date` : ''
+            }`}
+            tone={k.cheques.pastDue.count > 0 ? 'bad' : ''}
+          />
+        </Link>
+        <Link className="kpi-link" to="/cheques">
+          <KpiCard
+            label="Depositing in 7 days"
+            value={inr0(k.cheques.next7.amount)}
+            sub={`${num(k.cheques.next7.count)} cheques by ${fmtDate(k.cheques.next7.horizon)}`}
+            tone={k.cheques.next7.count > 0 ? 'due' : ''}
+          />
+        </Link>
+        <Link className="kpi-link" to="/dormant">
+          <KpiCard
+            label="Dormant customers"
+            value={num(k.dormant.count)}
+            sub={`no invoice since ${fmtDate(k.dormant.threshold)} (${k.dormant.months}m) · ${inr0(
+              k.dormant.outstanding
+            )} owed`}
+          />
+        </Link>
+        <Link className="kpi-link" to="/focus">
+          <KpiCard
+            label="Focus plan open"
+            value={num(k.focus.open)}
+            sub={`${num(k.focus.total)} customer(s) planned for ${k.focus.month}`}
+          />
+        </Link>
+      </div>
+
       <MtdBrands data={data.mtdBrands} />
 
       <div className="two-col">

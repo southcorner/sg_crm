@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from 'react-router-dom';
 import api from '../api.js';
-import { inr, fmtDate, fmtDateTime } from '../format.js';
+import { inr, fmtDate, fmtDateTime, titleCase, qs } from '../format.js';
 import { Card, Loading, ErrorBox, EmptyRow, StatusChip, Tabs, Banner } from '../components/ui.jsx';
+import ChequeForm, { STATUS_TONE, nextStatuses } from '../components/ChequeForm.jsx';
+import { chequeRowClass, depositHint } from './Cheques.jsx';
 
 function addressLines(addr) {
   if (!addr) return [];
@@ -206,16 +208,126 @@ export default function CustomerDetail() {
         </Card>
       )}
 
-      {tab === 'cheques' && (
-        <Card title="Cheques">
-          <p className="muted-text">The cheque register lands in phase 3.</p>
-        </Card>
-      )}
+      {tab === 'cheques' && <ChequesTab customerId={id} customerName={customer.contact_name} />}
 
       {tab === 'assignments' && (
         <AssignmentsTab customerId={id} effectiveRep={effectiveRep} assignments={assignments} />
       )}
     </div>
+  );
+}
+
+/** This customer's slice of the cheque register, with an add form pinned to them. */
+function ChequesTab({ customerId, customerName }) {
+  const queryClient = useQueryClient();
+  const [adding, setAdding] = useState(false);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ['cheques', 'customer', customerId],
+    queryFn: () => api.get(`/cheques${qs({ customer: customerId })}`),
+  });
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ['cheques'] });
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+  };
+
+  const create = useMutation({
+    mutationFn: (body) => api.post('/cheques', body),
+    onSuccess: () => {
+      setAdding(false);
+      refresh();
+    },
+  });
+  const update = useMutation({ mutationFn: ({ id, patch }) => api.put(`/cheques/${id}`, patch), onSuccess: refresh });
+  const remove = useMutation({ mutationFn: (id) => api.del(`/cheques/${id}`), onSuccess: refresh });
+
+  const rows = data?.rows || [];
+  const leadDays = data?.leadDays ?? 3;
+
+  return (
+    <Card
+      title="Cheques"
+      actions={
+        <button type="button" className="btn" onClick={() => setAdding((v) => !v)}>
+          {adding ? 'Cancel' : 'Add cheque'}
+        </button>
+      }
+    >
+      <ErrorBox error={error || create.error || update.error || remove.error} />
+
+      {adding ? (
+        <ChequeForm
+          customer={{ id: customerId, name: customerName }}
+          lockCustomer
+          pending={create.isPending}
+          onCancel={() => setAdding(false)}
+          onSubmit={(body) => create.mutate(body)}
+        />
+      ) : null}
+
+      {isLoading ? (
+        <Loading />
+      ) : (
+        <div className="table-wrap">
+          <table className="data-table cheque-table">
+            <thead>
+              <tr>
+                <th>Cheque</th>
+                <th>Bank</th>
+                <th>Received</th>
+                <th>Deposits</th>
+                <th className="right">Amount</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length ? (
+                rows.map((c) => (
+                  <tr key={c.id} className={chequeRowClass(c, leadDays)}>
+                    <td className="mono">{c.cheque_number || '—'}</td>
+                    <td>{c.bank_name || '—'}</td>
+                    <td>{fmtDate(c.received_date)}</td>
+                    <td>
+                      {fmtDate(c.deposit_date)}
+                      <div className="sub">{depositHint(c)}</div>
+                    </td>
+                    <td className="right">{inr(c.amount)}</td>
+                    <td>
+                      <span className={`chip ${STATUS_TONE[c.status] || 'muted'}`}>{titleCase(c.status)}</span>
+                    </td>
+                    <td className="right nowrap">
+                      {nextStatuses(c.status).map((s) => (
+                        <button
+                          key={s}
+                          type="button"
+                          className="btn ghost small"
+                          disabled={update.isPending}
+                          onClick={() => update.mutate({ id: c.id, patch: { status: s } })}
+                        >
+                          {titleCase(s)}
+                        </button>
+                      ))}
+                      <button
+                        type="button"
+                        className="btn danger ghost small"
+                        disabled={remove.isPending}
+                        onClick={() => remove.mutate(c.id)}
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <EmptyRow colSpan={7}>No cheques on file for this customer.</EmptyRow>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 

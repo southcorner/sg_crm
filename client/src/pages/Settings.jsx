@@ -40,17 +40,101 @@ export default function Settings() {
           <p className="muted-text">The WhatsApp session and QR pairing land in phase 5.</p>
         </Card>
       )}
-      {tab === 'reminders' && (
-        <Card title="Reminders">
-          <p className="muted-text">Digest schedule, SMTP and reminder rules land in phase 4.</p>
-        </Card>
-      )}
+      {tab === 'reminders' && <RemindersTab />}
       {tab === 'account' && (
         <Card title="Account">
           <p className="muted-text">Password change lands with the reminder-engine phase.</p>
         </Card>
       )}
     </div>
+  );
+}
+
+/**
+ * The reminder rules that already have something behind them: the dormancy
+ * window and the cheque lead time. The digest schedule and SMTP land in phase 4
+ * and are called out as such rather than shown as dead inputs.
+ */
+function RemindersTab() {
+  const queryClient = useQueryClient();
+  const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings') });
+  const [draft, setDraft] = useState(null);
+
+  const save = useMutation({
+    mutationFn: (body) => api.put('/settings', body),
+    onSuccess: (res) => {
+      setDraft(null);
+      queryClient.setQueryData(['settings'], res);
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      queryClient.invalidateQueries({ queryKey: ['dormant'] });
+      queryClient.invalidateQueries({ queryKey: ['cheques'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+
+  if (isLoading) return <Loading />;
+
+  const settings = data?.settings || {};
+  const value = (key) => (draft && draft[key] !== undefined ? draft[key] : String(settings[key] ?? ''));
+  const set = (key, v) => setDraft((d) => ({ ...(d || {}), [key]: v }));
+
+  return (
+    <>
+      <Card title="Reminder rules">
+        <ErrorBox error={error || save.error} />
+        <form
+          className="stack-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save.mutate({
+              dormant_months: Number(value('dormant_months')),
+              cheque_lead_days: Number(value('cheque_lead_days')),
+            });
+          }}
+        >
+          <label>
+            Dormant after (months)
+            <input
+              type="number"
+              min="1"
+              max="120"
+              step="1"
+              value={value('dormant_months')}
+              onChange={(e) => set('dormant_months', e.target.value)}
+            />
+            <span className="muted-text">
+              A customer with no invoice for this many months shows up on the Dormant page and in the digest.
+            </span>
+          </label>
+          <label>
+            Cheque reminder lead time (days)
+            <input
+              type="number"
+              min="0"
+              max="60"
+              step="1"
+              value={value('cheque_lead_days')}
+              onChange={(e) => set('cheque_lead_days', e.target.value)}
+            />
+            <span className="muted-text">
+              A pending cheque is flagged — and once phase 4 lands, its rep reminded — this many days before its
+              deposit date.
+            </span>
+          </label>
+          <div className="form-row">
+            <button type="submit" className="btn" disabled={save.isPending || !draft}>
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
+            {save.isSuccess && !draft ? <span className="form-ok">Saved.</span> : null}
+          </div>
+        </form>
+      </Card>
+      <Card title="Digest delivery">
+        <p className="muted-text">
+          The daily digest schedule, SMTP credentials and the overdue-invoice rules land in phase 4.
+        </p>
+      </Card>
+    </>
   );
 }
 

@@ -100,6 +100,30 @@ function customerRepNameExpr(alias = 'c') {
   )`;
 }
 
+/**
+ * Effective rep *id* for a customer row aliased `alias`, as of today — the id
+ * counterpart of customerRepNameExpr(). Resolves the same way currentRep() does
+ * (assignment first, else the latest non-void invoice's effective rep) and
+ * yields NULL when nothing matches a known salesperson, so callers can join
+ * `salespersons` on it and surface "Unattributed" instead of guessing.
+ */
+function customerRepIdExpr(alias = 'c') {
+  return `COALESCE(
+    (SELECT a.salesperson_id FROM customer_rep_assignments a
+      WHERE a.customer_id = ${alias}.zoho_contact_id
+        AND a.superseded_at IS NULL
+        AND a.effective_from <= date('now', 'localtime')
+        AND (a.effective_to IS NULL OR date('now', 'localtime') < a.effective_to)
+      ORDER BY a.effective_from DESC, a.id DESC
+      LIMIT 1),
+    (SELECT ${effectiveRepExpr('i')}
+       FROM invoices i
+      WHERE i.customer_id = ${alias}.zoho_contact_id AND i.status <> 'void'
+      ORDER BY i.invoice_date DESC, i.zoho_invoice_id DESC
+      LIMIT 1)
+  )`;
+}
+
 /** 'assigned' when an explicit assignment covers today, else 'invoice'. */
 function customerRepSourceExpr(alias = 'c') {
   return `CASE WHEN EXISTS (
@@ -350,6 +374,7 @@ module.exports = {
   effectiveRepExpr,
   invoiceRepCte,
   customerRepNameExpr,
+  customerRepIdExpr,
   customerRepSourceExpr,
   listAssignments,
   currentRep,

@@ -13,6 +13,9 @@ const { route } = require('./util');
 const sync = require('../zoho/sync');
 const auth = require('../zoho/auth');
 const perf = require('../services/performance');
+const cheques = require('../services/cheques');
+const dormant = require('../services/dormant');
+const focus = require('../services/focus');
 
 const router = express.Router();
 
@@ -97,6 +100,11 @@ router.get(
 
     const syncStatus = sync.getSyncStatus();
 
+    // phase 3 workflow tiles
+    const chequeStats = cheques.chequeSummary();
+    const dormantStats = dormant.dormantCount();
+    const focusStats = focus.openFocusCount();
+
     res.json({
       kpis: {
         customers: {
@@ -109,6 +117,19 @@ router.get(
         outstanding: { amount: outstanding.amount, count: outstanding.count },
         overdue: { amount: overdue.amount, count: overdue.count },
         mtdPayments: { amount: paymentsMtd.amount, count: paymentsMtd.count },
+        cheques: {
+          pending: chequeStats.pending,
+          next7: chequeStats.next7,
+          pastDue: chequeStats.pastDue,
+          leadDays: chequeStats.leadDays,
+        },
+        dormant: {
+          count: dormantStats.count,
+          months: dormantStats.months,
+          threshold: dormantStats.threshold,
+          outstanding: dormantStats.outstanding,
+        },
+        focus: { month: focusStats.month, open: focusStats.open, total: focusStats.total },
       },
       topOutstanding,
       recentInvoices,

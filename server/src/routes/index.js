@@ -17,6 +17,10 @@ const itemRoutes = require('./items');
 const performanceRoutes = require('./performance');
 const targetRoutes = require('./targets');
 const repRoutes = require('./reps');
+const focusRoutes = require('./focus');
+const dormantRoutes = require('./dormant');
+const chequeRoutes = require('./cheques');
+const settingsRoutes = require('./settings');
 const config = require('../config');
 
 const router = express.Router();
@@ -41,5 +45,11 @@ router.use('/items', itemRoutes);
 router.use('/performance', performanceRoutes);
 router.use('/targets', targetRoutes);
 router.use('/reps', repRoutes);
+
+// phase 3 — CRM workflows: focus plans, dormant customers, cheque register
+router.use('/focus', focusRoutes);
+router.use('/dormant', dormantRoutes);
+router.use('/cheques', chequeRoutes);
+router.use('/settings', settingsRoutes);
 
 module.exports = router;

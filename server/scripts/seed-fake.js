@@ -93,6 +93,8 @@ const PAYMENT_MODES = ['cash', 'banktransfer', 'cheque', 'upi'];
 
 function reset(db) {
   const tables = [
+    'cheques',
+    'focus_plans',
     'item_brand_map',
     'brand_rules',
     'brands',
@@ -463,6 +465,9 @@ function seedAll({ doReset = false } = {}) {
   // --- phase 2: brands, rules, mapping, targets, rep assignments ----------
   const phase2 = seedPhase2(db, { customers });
 
+  // --- phase 3: dormant customers, focus plan, cheque register ------------
+  const phase3 = seedPhase3(db, { customers });
+
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
   for (const entity of ['salespersons', 'items', 'customers', 'invoices', 'payments']) {
     sync.updateSyncState(entity, {
@@ -498,6 +503,11 @@ function seedAll({ doReset = false } = {}) {
     `brands: ${phase2.brands} · rules: ${phase2.rules} · mapped items: ${phase2.mapping.mapped} ` +
       `(${phase2.mapping.manual} manual, ${phase2.mapping.unmapped} unmapped) · targets: ${phase2.targets} ` +
       `· assignments: ${phase2.assignments.length}`
+  );
+  console.log(
+    `cheques: ${phase3.cheques} (${phase3.dueInLeadDays} due in ${phase3.leadDays} days) · ` +
+      `dormant customers seeded: ${phase3.dormantCustomers} (list at ${phase3.dormantMonths}m: ${phase3.dormantNow}) · ` +
+      `focus items for ${phase3.month}: ${phase3.focus}`
   );
   return counts;
 }
@@ -598,6 +608,155 @@ function seedPhase2(db, { customers }) {
     mapping: brandsService.mappingStats(),
     targets: TARGETS.length,
     assignments,
+    month,
+  };
+}
+
+/**
+ * Phase-3 fixtures.
+ *
+ *  * three customers whose last invoice is 5 / 8 / 6 months old (one of them
+ *    Zoho-inactive) so the Dormant page has rows at the default 3-month
+ *    threshold and the include-inactive toggle visibly changes the list;
+ *  * a cheque register spanning every status with deposit dates from today−5
+ *    to today+10 — including a cheque due exactly `cheque_lead_days` out (what
+ *    the phase-4 reminder fires on) and a *deposited* cheque on the same day,
+ *    which must NOT be picked up;
+ *  * focus items for the current month, open and done, one of them a dormant
+ *    customer so the "add to focus" round-trip has a visible end state.
+ */
+function seedPhase3(db, { customers }) {
+  const sync = require('../src/zoho/sync');
+  const chequeService = require('../src/services/cheques');
+  const focusService = require('../src/services/focus');
+  const dormantService = require('../src/services/dormant');
+  const config2 = require('../src/config');
+
+  const today = localIso(new Date());
+  const month = today.slice(0, 7);
+  const leadDays = Number(config2.getSetting('cheque_lead_days', 3)) || 3;
+  const plusDays = (n) => chequeService.addDays(today, n);
+
+  // --- dormant customers ---------------------------------------------------
+  const DORMANT = [
+    { idx: 11, name: 'Heritage Cycle Works', city: 'Lucknow', monthsAgo: 5, status: 'active', rep: REPS[0] },
+    { idx: 12, name: 'Frontier Sports Depot', city: 'Guwahati', monthsAgo: 8, status: 'active', rep: REPS[1] },
+    { idx: 13, name: 'Old Town Bicycles', city: 'Indore', monthsAgo: 6, status: 'inactive', rep: REPS[2] },
+  ];
+
+  sync.upsertCustomers(
+    DORMANT.map((d) => ({
+      contact_id: `${PREFIX}CUST${d.idx}`,
+      contact_name: d.name,
+      company_name: `${d.name} Pvt Ltd`,
+      email: `${d.name.toLowerCase().replace(/[^a-z]+/g, '.')}@example.in`,
+      phone: `0731-${intBetween(2000000, 4999999)}`,
+      mobile: `9${intBetween(100000000, 999999999)}`,
+      contact_type: 'customer',
+      status: d.status,
+      place_of_contact: d.city,
+      currency_code: 'INR',
+      payment_terms: 30,
+      payment_terms_label: 'Net 30',
+      outstanding_receivable: 0,
+      billing_address: { address: `${intBetween(1, 90)} Station Road`, city: d.city, country: 'India' },
+      shipping_address: null,
+      last_modified_time: zohoTime(daysAgo(d.monthsAgo * 30)),
+    }))
+  );
+
+  const dormantInvoices = DORMANT.map((d, n) => {
+    const date = daysAgo(Math.round(d.monthsAgo * 30.5));
+    const due = new Date(date.getTime() + 30 * 86400000);
+    const total = money(45000, 180000);
+    return {
+      invoice_id: `${PREFIX}INV-DORM${n + 1}`,
+      invoice_number: `INV-${String(3000 + n)}`,
+      customer_id: `${PREFIX}CUST${d.idx}`,
+      customer_name: d.name,
+      salesperson_id: d.rep.id,
+      salesperson_name: d.rep.name,
+      date: isoDate(date),
+      due_date: isoDate(due),
+      status: 'overdue',
+      total,
+      sub_total: Math.round((total / 1.18) * 100) / 100,
+      balance: n === 1 ? 0 : total, // one of them owes nothing — still dormant
+      currency_code: 'INR',
+      reference_number: `PO-${intBetween(100, 999)}`,
+      last_modified_time: zohoTime(date),
+    };
+  });
+  sync.upsertInvoices(dormantInvoices);
+  db.prepare(
+    `UPDATE invoices SET line_items_synced = 1, line_items_synced_at = datetime('now')
+      WHERE zoho_invoice_id LIKE '${PREFIX}INV-DORM%'`
+  ).run();
+
+  sync.recomputeCustomerInvoiceDates();
+  db.prepare(
+    `UPDATE customers SET outstanding_receivable = (
+       SELECT COALESCE(SUM(balance), 0) FROM invoices i
+        WHERE i.customer_id = customers.zoho_contact_id
+          AND i.status NOT IN ('void', 'draft'))`
+  ).run();
+
+  // --- cheque register -----------------------------------------------------
+  db.prepare('DELETE FROM cheques').run();
+  const CHEQUES = [
+    // pending, spread across the window — the +leadDays one is what phase 4 fires on
+    { customer: customers[0], days: -5, amount: 45000, status: 'pending', bank: 'HDFC Bank', note: 'Chased twice — still not deposited.' },
+    { customer: customers[1], days: 0, amount: 128500, status: 'pending', bank: 'ICICI Bank' },
+    { customer: customers[2], days: leadDays, amount: 76250, status: 'pending', bank: 'Axis Bank', note: 'Confirm funds before depositing.' },
+    { customer: customers[3], days: leadDays, amount: 31000, status: 'deposited', bank: 'SBI' }, // same day, wrong status
+    { customer: customers[4], days: 7, amount: 210000, status: 'pending', bank: 'Kotak Mahindra' },
+    { customer: customers[5], days: 10, amount: 58000, status: 'pending', bank: 'Yes Bank' },
+    // settled / failed history
+    { customer: customers[6], days: -2, amount: 92000, status: 'deposited', bank: 'HDFC Bank' },
+    { customer: customers[7], days: -4, amount: 64500, status: 'cleared', bank: 'Bank of Baroda' },
+    { customer: customers[8], days: -3, amount: 38900, status: 'bounced', bank: 'PNB', note: 'Insufficient funds — re-issue requested.' },
+    { customer: customers[0], days: -1, amount: 15400, status: 'cleared', bank: 'ICICI Bank' },
+  ];
+
+  let chequeNo = 400001;
+  for (const c of CHEQUES) {
+    const created = chequeService.createCheque({
+      customer_id: c.customer.contact_id,
+      amount: c.amount,
+      cheque_number: String(chequeNo),
+      bank_name: c.bank,
+      received_date: plusDays(c.days - intBetween(3, 12)),
+      deposit_date: plusDays(c.days),
+      note: c.note || null,
+    });
+    if (c.status !== 'pending') chequeService.updateCheque(created.id, { status: c.status });
+    chequeNo += 1;
+  }
+
+  // --- focus plan for the current month ------------------------------------
+  db.prepare('DELETE FROM focus_plans WHERE month = ?').run(month);
+  const FOCUS = [
+    { id: customers[0].contact_id, note: 'Push the new frame range — reorder due.', status: 'open' },
+    { id: customers[2].contact_id, note: 'Collect the overdue balance in person.', status: 'open' },
+    { id: `${PREFIX}CUST11`, note: 'Dormant since spring — win the account back.', status: 'open' },
+    { id: customers[5].contact_id, note: 'Store visit done; quote sent.', status: 'done' },
+  ];
+  for (const f of FOCUS) {
+    const item = focusService.createFocus({ month, customer_id: f.id, note: f.note });
+    if (f.status !== 'open') focusService.updateFocus(item.id, { status: f.status });
+  }
+
+  const dueSoon = chequeService.chequesDueInDays(leadDays);
+  const dormantNow = dormantService.listDormant({}).total;
+
+  return {
+    cheques: CHEQUES.length,
+    leadDays,
+    dueInLeadDays: dueSoon.length,
+    dormantCustomers: DORMANT.length,
+    dormantMonths: dormantService.dormantMonths(),
+    dormantNow,
+    focus: FOCUS.length,
     month,
   };
 }

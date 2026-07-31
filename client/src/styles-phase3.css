@@ -1,0 +1,172 @@
+/* ---- phase 3: focus plans, dormant customers, cheque register ---- */
+
+/* customer picker (focus "add customers", cheque forms) */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.picker-input {
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 14px;
+}
+
+.picker-results {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  max-height: 280px;
+  overflow-y: auto;
+  background: var(--panel);
+}
+
+.picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 11px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-size: 13.5px;
+  color: inherit;
+}
+
+.picker-row:last-child {
+  border-bottom: 0;
+}
+
+.picker-row:hover {
+  background: #f2f6fd;
+}
+
+.picker-row.on {
+  background: #e8f0fe;
+}
+
+.picker-name {
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+}
+
+.picker-company {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.picker-meta {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.picker-amount {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.picker-empty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.picker-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.picker-label {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.picker-chosen {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fafbfd;
+}
+
+/* focus plan */
+.focus-table .note-input {
+  width: 100%;
+  min-width: 220px;
+}
+
+.focus-table .note-cell {
+  width: 32%;
+}
+
+.picked-wrap {
+  margin-top: 10px;
+}
+
+.row-muted td {
+  opacity: 0.62;
+}
+
+/* cheque register */
+.cheque-form .form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 14px;
+}
+
+.cheque-form .form-grid label,
+.cheque-form > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.cheque-form input,
+.cheque-form select {
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 13.5px;
+  color: var(--ink);
+}
+
+.cheque-table tr.row-due-soon > td {
+  background: #fff8e8;
+}
+
+.cheque-table tr.row-past-due > td {
+  background: #fdecea;
+}
+
+.cheque-table .btn.small + .btn.small {
+  margin-left: 4px;
+}
+
+/* dashboard tiles that navigate */
+.kpi-link {
+  display: block;
+  min-width: 0;
+}
+
+.kpi-link .kpi {
+  height: 100%;
+}
+
+.kpi-link:hover .kpi {
+  border-color: var(--accent);
+}

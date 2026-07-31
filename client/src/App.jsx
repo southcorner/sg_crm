@@ -13,6 +13,9 @@ import Performance from './pages/Performance.jsx';
 import Brands from './pages/Brands.jsx';
 import Targets from './pages/Targets.jsx';
 import Reps from './pages/Reps.jsx';
+import FocusPlan from './pages/FocusPlan.jsx';
+import Dormant from './pages/Dormant.jsx';
+import Cheques from './pages/Cheques.jsx';
 import Placeholder from './pages/Placeholder.jsx';
 
 // Routes built so far; everything else in the nav is still a stub.
@@ -26,6 +29,9 @@ const BUILT = new Set([
   '/brands',
   '/targets',
   '/reps',
+  '/focus',
+  '/dormant',
+  '/cheques',
 ]);
 const stubRoutes = NAV_ITEMS.filter((item) => !BUILT.has(item.to));
 
@@ -51,6 +57,9 @@ export default function App() {
         <Route path="/brands" element={<Brands />} />
         <Route path="/targets" element={<Targets />} />
         <Route path="/reps" element={<Reps />} />
+        <Route path="/focus" element={<FocusPlan />} />
+        <Route path="/dormant" element={<Dormant />} />
+        <Route path="/cheques" element={<Cheques />} />
         <Route path="/settings" element={<Settings />} />
         {stubRoutes.map((item) => (
           <Route
