@@ -56,6 +56,30 @@ function markLogin(id) {
   getDb().prepare("UPDATE admin_user SET last_login_at = datetime('now') WHERE id = ?").run(id);
 }
 
+/**
+ * True when the stored hash still matches the built-in default password.
+ * Checked once at boot so production can shout about it, and surfaced to the
+ * Settings → Security tab so the admin sees it in the UI too.
+ */
+const defaultPasswordCache = new Map(); // password_hash → boolean
+
+function isUsingDefaultPassword(admin = getAdmin()) {
+  if (!admin || !admin.password_hash) return false;
+  // bcrypt is deliberately slow and /auth/me is called on every page load
+  if (defaultPasswordCache.has(admin.password_hash)) {
+    return defaultPasswordCache.get(admin.password_hash);
+  }
+  let result = false;
+  try {
+    result = bcrypt.compareSync(config.DEFAULT_ADMIN_PASSWORD, admin.password_hash);
+  } catch (_err) {
+    result = false;
+  }
+  if (defaultPasswordCache.size > 8) defaultPasswordCache.clear();
+  defaultPasswordCache.set(admin.password_hash, result);
+  return result;
+}
+
 function changePassword(id, newPassword) {
   const hash = bcrypt.hashSync(String(newPassword), SALT_ROUNDS);
   getDb()
@@ -70,6 +94,7 @@ function publicAdmin(admin) {
     id: admin.id,
     username: admin.username,
     last_login_at: admin.last_login_at,
+    password_is_default: isUsingDefaultPassword(admin),
   };
 }
 
@@ -79,6 +104,7 @@ module.exports = {
   getAdminById,
   verifyCredentials,
   markLogin,
+  isUsingDefaultPassword,
   changePassword,
   publicAdmin,
 };

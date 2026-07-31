@@ -31,19 +31,123 @@ export default function Settings() {
           { key: 'zoho', label: 'Zoho' },
           { key: 'reminders', label: 'Reminders' },
           { key: 'whatsapp', label: 'WhatsApp' },
-          { key: 'account', label: 'Account' },
+          { key: 'account', label: 'Security' },
         ]}
       />
 
       {tab === 'zoho' && <ZohoTab />}
       {tab === 'whatsapp' && <WhatsAppTab />}
       {tab === 'reminders' && <RemindersTab />}
-      {tab === 'account' && (
-        <Card title="Account">
-          <p className="muted-text">Password change lands with the reminder-engine phase.</p>
-        </Card>
-      )}
+      {tab === 'account' && <SecurityTab />}
     </div>
+  );
+}
+
+/**
+ * The single admin account. There is no user management to build here — one
+ * login, one password — so this tab is the password form plus the nag that
+ * appears while the password is still the shipped default.
+ */
+function SecurityTab() {
+  const queryClient = useQueryClient();
+  const meQuery = useQuery({ queryKey: ['auth', 'me'], queryFn: () => api.get('/auth/me') });
+  const [form, setForm] = useState({ current: '', next: '', confirm: '' });
+  const [localError, setLocalError] = useState(null);
+
+  const change = useMutation({
+    mutationFn: (body) => api.post('/auth/change-password', body),
+    onSuccess: () => {
+      setForm({ current: '', next: '', confirm: '' });
+      setLocalError(null);
+      queryClient.invalidateQueries({ queryKey: ['auth', 'me'] });
+    },
+  });
+
+  const user = meQuery.data?.user;
+  const mismatch = form.confirm.length > 0 && form.next !== form.confirm;
+
+  return (
+    <>
+      {user?.password_is_default ? (
+        <Banner tone="warn">
+          This account is still using the default password <code>admin123</code>. Anyone who can reach this machine on
+          the network can log in. Change it now.
+        </Banner>
+      ) : null}
+
+      <Card title="Admin password">
+        <p className="muted-text">
+          One admin account, <strong>{user?.username || 'admin'}</strong>
+          {user?.last_login_at ? ` · last login ${fmtDateTime(user.last_login_at)}` : ''}. Reps never log in — they
+          only receive digests — so this is the only credential the CRM has.
+        </p>
+
+        <form
+          className="stack-form"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (form.next !== form.confirm) {
+              setLocalError('the two new passwords do not match');
+              return;
+            }
+            if (form.next.length < 8) {
+              setLocalError('the new password must be at least 8 characters');
+              return;
+            }
+            setLocalError(null);
+            change.mutate({ current_password: form.current, new_password: form.next });
+          }}
+        >
+          <label>
+            Current password
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={form.current}
+              onChange={(e) => setForm({ ...form, current: e.target.value })}
+              required
+            />
+          </label>
+          <label>
+            New password
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={form.next}
+              onChange={(e) => setForm({ ...form, next: e.target.value })}
+              minLength={8}
+              required
+            />
+            <span className="hint">At least 8 characters. It is stored as a bcrypt hash, never in plain text.</span>
+          </label>
+          <label>
+            Confirm new password
+            <input
+              type="password"
+              autoComplete="new-password"
+              value={form.confirm}
+              onChange={(e) => setForm({ ...form, confirm: e.target.value })}
+              required
+            />
+            {mismatch ? <span className="form-error">The two new passwords do not match.</span> : null}
+          </label>
+          <div className="form-row">
+            <button type="submit" className="btn" disabled={change.isPending || mismatch || !form.current || !form.next}>
+              {change.isPending ? 'Saving…' : 'Change password'}
+            </button>
+            {localError ? <span className="form-error">{localError}</span> : null}
+            {change.isError ? <span className="form-error">{change.error.message}</span> : null}
+            {change.isSuccess ? <span className="form-ok">Password changed. Your session stays signed in.</span> : null}
+          </div>
+        </form>
+
+        <p className="muted-text">
+          Forgotten it? There is no reset email. Stop the service, put a new <code>ADMIN_PASSWORD</code> in{' '}
+          <code>.env</code>, delete the row in the <code>admin_user</code> table (or restore a backup) and restart —
+          the server recreates the account on the next boot.
+        </p>
+      </Card>
+    </>
   );
 }
 

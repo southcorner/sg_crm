@@ -27,10 +27,15 @@ function resolveFromRoot(p) {
 const DATA_DIR = resolveFromRoot(process.env.DATA_DIR || 'data');
 const DB_PATH = resolveFromRoot(process.env.DB_PATH || path.join('data', 'crm.db'));
 
+const DEV_SESSION_SECRET = 'sg-crm-dev-secret-change-me';
+const DEFAULT_ADMIN_PASSWORD = 'admin123';
+
 const env = {
   ROOT_DIR,
   DATA_DIR,
   DB_PATH,
+  LOGS_DIR: path.join(DATA_DIR, 'logs'),
+  BACKUP_DIR: resolveFromRoot(process.env.BACKUP_DIR || path.join('data', 'backups')),
   CLIENT_DIST_DIR: path.join(ROOT_DIR, 'client', 'dist'),
   WWEBJS_DIR: path.join(DATA_DIR, 'wwebjs'),
 
@@ -40,11 +45,14 @@ const env = {
   },
   PORT: Number(process.env.PORT || 3000),
 
-  SESSION_SECRET: process.env.SESSION_SECRET || 'sg-crm-dev-secret-change-me',
+  SESSION_SECRET: process.env.SESSION_SECRET || DEV_SESSION_SECRET,
+  // production refuses to boot without a real one — see assertProductionConfig()
+  SESSION_SECRET_IS_DEFAULT: !process.env.SESSION_SECRET,
   SESSION_MAX_AGE_MS: 1000 * 60 * 60 * 24 * 30, // 30 days
 
   ADMIN_USERNAME: process.env.ADMIN_USERNAME || 'admin',
-  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || 'admin123',
+  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD,
+  DEFAULT_ADMIN_PASSWORD,
   ADMIN_PASSWORD_IS_DEFAULT: !process.env.ADMIN_PASSWORD,
 
   // Zoho (phase 1) — refresh token + org id live in the settings table
@@ -64,6 +72,30 @@ function ensureDataDir() {
     fs.mkdirSync(env.DATA_DIR, { recursive: true });
   }
   return env.DATA_DIR;
+}
+
+/**
+ * Fail-fast checks for a production boot. Returns the list of problems rather
+ * than exiting, so it can be unit-tested; index.js prints them and exits 1.
+ *
+ * Only SESSION_SECRET is fatal: booting production with the built-in dev secret
+ * would let anyone who has read the source forge a session cookie. Everything
+ * else that is merely unwise is warned about in index.js.
+ */
+function productionConfigProblems(e = env) {
+  const problems = [];
+  if (e.NODE_ENV !== 'production') return problems;
+  if (e.SESSION_SECRET_IS_DEFAULT || !e.SESSION_SECRET) {
+    problems.push(
+      'SESSION_SECRET is not set. Put a long random string in C:\\sg_crm\\.env before starting in production, e.g.\n' +
+        '    SESSION_SECRET=' +
+        'paste-32-plus-random-chars-here\n' +
+        '  (generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))")'
+    );
+  } else if (e.SESSION_SECRET.length < 16) {
+    problems.push('SESSION_SECRET is shorter than 16 characters — use at least 32 random characters.');
+  }
+  return problems;
 }
 
 /** Defaults for the UI-editable settings, seeded on first boot. */
@@ -150,6 +182,7 @@ module.exports = {
   ...env,
   isProduction: env.isProduction,
   ensureDataDir,
+  productionConfigProblems,
   SETTING_DEFAULTS,
   getSetting,
   setSetting,
