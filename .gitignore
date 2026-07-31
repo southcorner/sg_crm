@@ -1,0 +1,22 @@
+# runtime data (sqlite db, whatsapp session)
+data/
+
+# secrets
+.env
+
+# dependencies
+node_modules/
+
+# client build output
+client/dist/
+
+# logs
+*.log
+npm-debug.log*
+logs/
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
