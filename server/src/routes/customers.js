@@ -1,16 +1,26 @@
 'use strict';
 
 /**
- * GET /api/customers      searchable / sortable / paginated list
- * GET /api/customers/:id  detail + that customer's invoices and payments
+ * GET  /api/customers                  searchable / sortable / paginated list
+ * GET  /api/customers/:id              detail + invoices, payments, effective rep
+ * GET  /api/customers/:id/assignments   rep-assignment history
+ * POST /api/customers/:id/assign        reassign {salesperson_id, mode, note?}
+ * DELETE /api/customers/:id/assignments/:assignmentId  undo a reassignment
  */
 
 const express = require('express');
 const { z } = require('zod');
 const { getDb } = require('../db/connection');
 const { parsePaging, listResponse, route, sendError, likeTerm, sortColumn, sortDir } = require('./util');
+const attribution = require('../services/attribution');
 
 const router = express.Router();
+
+const assignSchema = z.object({
+  salesperson_id: z.string().trim().min(1).max(64),
+  mode: z.enum(['from_today', 'all_history']),
+  note: z.string().trim().max(300).nullish(),
+});
 
 const SORTS = {
   name: 'c.contact_name',
@@ -64,7 +74,9 @@ router.get(
       .prepare(
         `SELECT c.zoho_contact_id AS id, c.contact_name, c.company_name, c.email, c.phone,
                 c.mobile, c.status, c.outstanding_receivable, c.unused_credits,
-                c.first_invoice_date, c.last_invoice_date, c.invoice_count, c.payment_terms_label
+                c.first_invoice_date, c.last_invoice_date, c.invoice_count, c.payment_terms_label,
+                ${attribution.customerRepNameExpr('c')} AS effective_rep_name,
+                ${attribution.customerRepSourceExpr('c')} AS effective_rep_source
            FROM customers c
            ${whereSql}
           ORDER BY ${orderCol} ${dir} NULLS LAST, c.contact_name ASC
@@ -144,8 +156,42 @@ router.get(
       invoices,
       payments,
       totals: { ...totals, payments_total: paymentTotal },
+      effectiveRep: attribution.currentRep(id),
+      assignments: attribution.listAssignments(id),
     });
   })
+);
+
+// --- rep assignments -------------------------------------------------------
+
+router.get(
+  '/:id/assignments',
+  route((req, res) => {
+    const id = String(req.params.id);
+    const exists = getDb().prepare('SELECT 1 AS n FROM customers WHERE zoho_contact_id = ?').get(id);
+    if (!exists) return res.status(404).json({ error: 'customer not found' });
+    return res.json({
+      current: attribution.currentRep(id),
+      assignments: attribution.listAssignments(id),
+      reps: attribution.listReps(),
+    });
+  })
+);
+
+router.post(
+  '/:id/assign',
+  route((req, res) => {
+    const parsed = assignSchema.safeParse(req.body || {});
+    if (!parsed.success) return sendError(res, parsed.error);
+    const { salesperson_id: salespersonId, mode, note } = parsed.data;
+    const result = attribution.assignCustomer(String(req.params.id), salespersonId, mode, note ?? null);
+    return res.status(201).json(result);
+  })
+);
+
+router.delete(
+  '/:id/assignments/:assignmentId',
+  route((req, res) => res.json(attribution.deleteAssignment(Number(req.params.assignmentId))))
 );
 
 function safeJson(value) {

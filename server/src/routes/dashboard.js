@@ -12,6 +12,7 @@ const { getDb } = require('../db/connection');
 const { route } = require('./util');
 const sync = require('../zoho/sync');
 const auth = require('../zoho/auth');
+const perf = require('../services/performance');
 
 const router = express.Router();
 
@@ -111,6 +112,8 @@ router.get(
       },
       topOutstanding,
       recentInvoices,
+      // MTD split by brand (line-item derived — see services/performance.js)
+      mtdBrands: perf.mtdBrands(),
       sync: {
         running: syncStatus.running,
         connected: syncStatus.connected,

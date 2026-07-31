@@ -116,6 +116,37 @@ export function ProgressBar({ value, max, label }) {
   );
 }
 
+export function Banner({ tone = 'info', children }) {
+  if (!children) return null;
+  return <div className={`banner ${tone}`}>{children}</div>;
+}
+
+/** Native month input — the whole app works in 'YYYY-MM' strings. */
+export function MonthPicker({ value, onChange, label = 'Month', max, min }) {
+  return (
+    <label className="month-picker">
+      <span>{label}</span>
+      <input type="month" value={value || ''} max={max} min={min} onChange={(e) => onChange(e.target.value)} />
+    </label>
+  );
+}
+
+export function Select({ label, value, onChange, options, allLabel }) {
+  return (
+    <label className="select-field">
+      {label ? <span>{label}</span> : null}
+      <select value={value ?? ''} onChange={(e) => onChange(e.target.value)}>
+        {allLabel ? <option value="">{allLabel}</option> : null}
+        {options.map((o) => (
+          <option key={String(o.value)} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 export function Tabs({ tabs, active, onChange }) {
   return (
     <div className="tabs">

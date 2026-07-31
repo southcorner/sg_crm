@@ -1,0 +1,340 @@
+/* ===========================================================================
+   Phase 2 — brands, performance, targets, reps, assignments.
+   Loaded after styles-data.css (see main.jsx).
+   ======================================================================== */
+
+/* ---- filter bar + controls ---- */
+.filter-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.filter-bar .spacer {
+  flex: 1;
+}
+
+.month-picker,
+.select-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.month-picker input,
+.select-field select {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  min-width: 130px;
+}
+
+.month-picker input:focus,
+.select-field select:focus,
+.cell-input:focus {
+  outline: 2px solid rgba(31, 111, 235, 0.35);
+  outline-offset: 1px;
+}
+
+.filters .month-picker,
+.filters .select-field {
+  align-items: flex-start;
+}
+
+/* ---- inline editable cells ---- */
+.cell-input {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  width: 100%;
+  max-width: 240px;
+}
+
+.cell-input.tiny {
+  max-width: 72px;
+}
+
+.cell-input.money {
+  max-width: 120px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.data-table tr.editing td {
+  background: #f7fafd;
+}
+
+.data-table tr.row-muted td {
+  opacity: 0.6;
+}
+
+.data-table.compact th,
+.data-table.compact td {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  font-size: 13px;
+}
+
+.data-table tfoot th {
+  border-top: 2px solid var(--line);
+  font-weight: 700;
+  background: #fafbfc;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.nowrap .btn + .btn {
+  margin-left: 4px;
+}
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+/* ---- brands ---- */
+.brand-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+.rule-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 0 4px;
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+}
+
+.rule-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rule-form input,
+.rule-form select {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  min-width: 160px;
+}
+
+/* ---- charts ---- */
+.chart-wrap {
+  margin: 4px 0 18px;
+}
+
+.recharts-cartesian-axis-tick text {
+  font-size: 12px;
+}
+
+.series-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+}
+
+/* ---- achievement meter ---- */
+.achievement {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.achievement-track {
+  display: inline-block;
+  width: 74px;
+  height: 6px;
+  border-radius: 3px;
+  background: #eaedf1;
+  overflow: hidden;
+}
+
+.achievement-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+}
+
+.achievement-fill.ok {
+  background: #1baf7a;
+}
+
+.achievement-fill.warn {
+  background: #eda100;
+}
+
+.achievement-fill.bad {
+  background: #e34948;
+}
+
+.achievement-label {
+  font-variant-numeric: tabular-nums;
+  min-width: 44px;
+  text-align: right;
+}
+
+/* ---- dashboard brand split ---- */
+.brand-bar {
+  display: flex;
+  width: 100%;
+  height: 14px;
+  border-radius: 4px;
+  overflow: hidden;
+  gap: 2px;
+  margin-bottom: 12px;
+  background: #eaedf1;
+}
+
+.brand-bar-seg {
+  display: block;
+  height: 100%;
+}
+
+.brand-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 6px 20px;
+}
+
+.brand-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.brand-legend-name {
+  flex: 1;
+}
+
+.brand-legend-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.brand-legend-pct {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* ---- targets grid ---- */
+.targets-grid td,
+.targets-grid th {
+  white-space: nowrap;
+}
+
+/* ---- pills ---- */
+.pill.tight {
+  margin-left: 6px;
+  font-size: 10.5px;
+  padding: 1px 6px;
+}
+
+/* ---- assignments ---- */
+.assign-form {
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 16px 0;
+  margin: 14px 0;
+}
+
+.assign-form select,
+.assign-form input[type='text'] {
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--ink);
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  width: 100%;
+  max-width: 460px;
+}
+
+.radio-set {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 4px 0;
+  max-width: 640px;
+}
+
+.radio-set legend {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.radio {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 0;
+}
+
+.radio + .radio {
+  border-top: 1px solid var(--line);
+}
+
+.radio input {
+  margin-top: 3px;
+}
+
+.radio span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.radio strong {
+  font-size: 13.5px;
+}
+
+.radio em {
+  font-style: normal;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}

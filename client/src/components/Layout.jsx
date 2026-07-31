@@ -16,7 +16,7 @@ export const NAV_ITEMS = [
   { to: '/dormant', label: 'Dormant', phase: 3 },
   { to: '/cheques', label: 'Cheques', phase: 3 },
   { to: '/reminders', label: 'Reminders', phase: 4 },
-  { to: '/reps', label: 'Reps', phase: 4 },
+  { to: '/reps', label: 'Reps', phase: 2 },
   { to: '/settings', label: 'Settings', phase: 1 },
 ];
 

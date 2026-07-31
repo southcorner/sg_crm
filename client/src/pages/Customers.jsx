@@ -85,6 +85,7 @@ export default function Customers() {
                 <tr>
                   <SortHeader label="Customer" column="name" sort={sort} dir={dir} onSort={applySort} />
                   <SortHeader label="Mobile" column="mobile" sort={sort} dir={dir} onSort={applySort} />
+                  <th>Effective rep</th>
                   <th className="right">Invoices</th>
                   <SortHeader
                     label="Outstanding"
@@ -117,6 +118,14 @@ export default function Customers() {
                         ) : null}
                       </td>
                       <td>{c.mobile || c.phone || '—'}</td>
+                      <td>
+                        {c.effective_rep_name || '—'}
+                        {c.effective_rep_source === 'assigned' ? (
+                          <span className="pill tight" title="Explicitly assigned in the CRM">
+                            assigned
+                          </span>
+                        ) : null}
+                      </td>
                       <td className="right">{c.invoice_count ?? 0}</td>
                       <td className={`right ${c.outstanding_receivable > 0 ? 'money-due' : ''}`}>
                         {inr(c.outstanding_receivable)}
@@ -126,7 +135,7 @@ export default function Customers() {
                     </tr>
                   ))
                 ) : (
-                  <EmptyRow colSpan={6}>No customers match this filter.</EmptyRow>
+                  <EmptyRow colSpan={7}>No customers match this filter.</EmptyRow>
                 )}
               </tbody>
             </table>

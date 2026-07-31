@@ -9,10 +9,24 @@ import Invoices from './pages/Invoices.jsx';
 import InvoiceDetail from './pages/InvoiceDetail.jsx';
 import Payments from './pages/Payments.jsx';
 import Settings from './pages/Settings.jsx';
+import Performance from './pages/Performance.jsx';
+import Brands from './pages/Brands.jsx';
+import Targets from './pages/Targets.jsx';
+import Reps from './pages/Reps.jsx';
 import Placeholder from './pages/Placeholder.jsx';
 
-// Routes built in phase 1; everything else in the nav is still a stub.
-const BUILT = new Set(['/', '/customers', '/invoices', '/payments', '/settings']);
+// Routes built so far; everything else in the nav is still a stub.
+const BUILT = new Set([
+  '/',
+  '/customers',
+  '/invoices',
+  '/payments',
+  '/settings',
+  '/performance',
+  '/brands',
+  '/targets',
+  '/reps',
+]);
 const stubRoutes = NAV_ITEMS.filter((item) => !BUILT.has(item.to));
 
 export default function App() {
@@ -33,6 +47,10 @@ export default function App() {
         <Route path="/invoices" element={<Invoices />} />
         <Route path="/invoices/:id" element={<InvoiceDetail />} />
         <Route path="/payments" element={<Payments />} />
+        <Route path="/performance" element={<Performance />} />
+        <Route path="/brands" element={<Brands />} />
+        <Route path="/targets" element={<Targets />} />
+        <Route path="/reps" element={<Reps />} />
         <Route path="/settings" element={<Settings />} />
         {stubRoutes.map((item) => (
           <Route

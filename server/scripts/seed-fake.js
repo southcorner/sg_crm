@@ -41,6 +41,11 @@ const money = (a, b) => Math.round((a + rnd() * (b - a)) * 100) / 100;
 function isoDate(d) {
   return d.toISOString().slice(0, 10);
 }
+/** Local (not UTC) YYYY-MM-DD — matches services/attribution.todayIso(). */
+function localIso(d) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 function daysAgo(n) {
   const d = new Date();
   d.setDate(d.getDate() - n);
@@ -88,6 +93,11 @@ const PAYMENT_MODES = ['cash', 'banktransfer', 'cheque', 'upi'];
 
 function reset(db) {
   const tables = [
+    'item_brand_map',
+    'brand_rules',
+    'brands',
+    'customer_rep_assignments',
+    'targets',
     'invoice_line_items',
     'payments',
     'invoices',
@@ -243,8 +253,9 @@ function seedAll({ doReset = false } = {}) {
     lineItemsByInvoice.set(invoiceId, lines);
   }
 
-  // a couple of guaranteed current-month invoices so the MTD KPI is non-zero
-  for (let i = 0; i < 3; i += 1) {
+  // a handful of guaranteed current-month invoices so the MTD KPI is non-zero
+  // (customers 3 and 4 are the ones phase 2 reassigns, so they need MTD rows)
+  for (let i = 0; i < 5; i += 1) {
     const customer = customers[i];
     const rep = REPS[i % REPS.length];
     const d = new Date();
@@ -288,6 +299,52 @@ function seedAll({ doReset = false } = {}) {
     ]);
   }
 
+  // Invoices dated TODAY for the two customers phase 2 reassigns, so the
+  // "from today" split is visible inside a single month: their mid-month
+  // invoice stays with the old rep, this one moves to the new one.
+  [3, 4].forEach((idx, n) => {
+    const customer = customers[idx];
+    const rep = REPS[idx % REPS.length];
+    const today = localIso(new Date());
+    const due = new Date(Date.now() + 30 * 86400000);
+    const item = items[(idx + 2) % items.length];
+    const qty = intBetween(2, 6);
+    const subTotal = qty * item.rate;
+    const total = Math.round(subTotal * 1.18 * 100) / 100;
+    const invoiceId = `${PREFIX}INV-TODAY${n + 1}`;
+    invoices.push({
+      invoice_id: invoiceId,
+      invoice_number: `INV-${String(2100 + n)}`,
+      customer_id: customer.contact_id,
+      customer_name: customer.contact_name,
+      salesperson_id: rep.id,
+      salesperson_name: rep.name,
+      date: today,
+      due_date: isoDate(due),
+      status: 'sent',
+      total,
+      sub_total: subTotal,
+      balance: total,
+      currency_code: 'INR',
+      reference_number: `PO-${intBetween(100, 999)}`,
+      last_modified_time: zohoTime(new Date()),
+    });
+    lineItemsByInvoice.set(invoiceId, [
+      {
+        line_item_id: `${PREFIX}LI-TODAY${n + 1}`,
+        item_id: item.item_id,
+        name: item.name,
+        description: item.name,
+        sku: item.sku,
+        quantity: qty,
+        unit: 'nos',
+        rate: item.rate,
+        discount_amount: 0,
+        item_total: subTotal,
+      },
+    ]);
+  });
+
   sync.upsertInvoices(invoices);
 
   // line items: same path the real second pass uses, so flags line up
@@ -320,17 +377,25 @@ function seedAll({ doReset = false } = {}) {
   });
   insertLines();
 
-  // leave the last 4 invoices unsynced so the backfill progress bar has something to show
-  const unsynced = invoices.slice(-4).map((i) => i.invoice_id);
+  // leave 4 invoices unsynced so the backfill progress bar — and the phase-2
+  // "N invoices pending line-item sync" banner — have something to show.
+  // Deliberately NOT the newest ones: those carry the brand/attribution demo.
+  const unsynced = invoices.slice(8, 12).map((i) => i.invoice_id);
   const markSynced = db.prepare(
     `UPDATE invoices SET line_items_synced = 1, line_items_synced_at = datetime('now') WHERE zoho_invoice_id = ?`
   );
   const markUnsynced = db.prepare(
     'UPDATE invoices SET line_items_synced = 0, line_items_synced_at = NULL WHERE zoho_invoice_id = ?'
   );
+  // A pending invoice genuinely has no line-item rows yet — that is what makes
+  // it invisible to the brand rollups, so the seeded state has to match.
+  const dropLines = db.prepare('DELETE FROM invoice_line_items WHERE invoice_id = ?');
   db.transaction(() => {
     for (const inv of invoices) markSynced.run(inv.invoice_id);
-    for (const id of unsynced) markUnsynced.run(id);
+    for (const id of unsynced) {
+      markUnsynced.run(id);
+      dropLines.run(id);
+    }
   })();
 
   // --- payments -----------------------------------------------------------
@@ -395,6 +460,9 @@ function seedAll({ doReset = false } = {}) {
           AND i.status NOT IN ('void', 'draft'))`
   ).run();
 
+  // --- phase 2: brands, rules, mapping, targets, rep assignments ----------
+  const phase2 = seedPhase2(db, { customers });
+
   const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
   for (const entity of ['salespersons', 'items', 'customers', 'invoices', 'payments']) {
     sync.updateSyncState(entity, {
@@ -426,7 +494,112 @@ function seedAll({ doReset = false } = {}) {
   console.log(`fake seed complete (db: ${path.relative(config.ROOT_DIR, config.DB_PATH)})`);
   console.table(counts);
   console.log(`line items: ${progress.synced}/${progress.total} invoices synced`);
+  console.log(
+    `brands: ${phase2.brands} · rules: ${phase2.rules} · mapped items: ${phase2.mapping.mapped} ` +
+      `(${phase2.mapping.manual} manual, ${phase2.mapping.unmapped} unmapped) · targets: ${phase2.targets} ` +
+      `· assignments: ${phase2.assignments.length}`
+  );
   return counts;
+}
+
+/**
+ * Phase-2 fixtures: three brands, rules covering every rule_type (category,
+ * name_pattern, sku_pattern, custom_field), two manual overrides — one that
+ * shadows a rule and one on an item no rule claims — targets for the current
+ * month (overall + per brand) and two reassigned customers, one 'from_today'
+ * and one 'all_history'.
+ */
+function seedPhase2(db, { customers }) {
+  const brandsService = require('../src/services/brands');
+  const attribution = require('../src/services/attribution');
+
+  // --- brands -------------------------------------------------------------
+  const BRANDS = [
+    ['Battalion', '#c0392b', 1],
+    ['Velocity', '#2980b9', 2],
+    ['Sundry', '#7f8c8d', 3],
+  ];
+  const brandId = {};
+  for (const [name, color, order] of BRANDS) {
+    db.prepare(
+      `INSERT INTO brands (name, color, sort_order) VALUES (?, ?, ?)
+       ON CONFLICT(name) DO UPDATE SET color = excluded.color, sort_order = excluded.sort_order,
+         is_active = 1, updated_at = datetime('now')`
+    ).run(name, color, order);
+    brandId[name] = db.prepare('SELECT id FROM brands WHERE name = ?').get(name).id;
+  }
+
+  // --- rules (re-created every seed so the ordering stays deterministic) ---
+  db.prepare('DELETE FROM brand_rules').run();
+  const RULES = [
+    [brandId.Battalion, 'category', null, 'Frames', 10],
+    [brandId.Velocity, 'name_pattern', null, '%Tyre%', 20],
+    [brandId.Velocity, 'category', null, 'Components', 30],
+    [brandId.Battalion, 'sku_pattern', null, 'HLM-%', 40],
+    [brandId.Battalion, 'custom_field', 'Brand', 'Battalion', 50],
+  ];
+  const insertRule = db.prepare(
+    `INSERT INTO brand_rules (brand_id, rule_type, custom_field_name, match_value, priority)
+     VALUES (?, ?, ?, ?, ?)`
+  );
+  db.transaction(() => {
+    for (const r of RULES) insertRule.run(...r);
+  })();
+
+  // --- materialize, then layer the manual overrides on top ----------------
+  db.prepare('DELETE FROM item_brand_map').run();
+  brandsService.remapItems();
+
+  // 'Carbon Road Fork' is Frames → Battalion by rule; the admin says Velocity.
+  // A re-run must never take this back.
+  const fork = db.prepare('SELECT zoho_item_id FROM items WHERE sku = ?').get('FRK-RD-CB');
+  if (fork) brandsService.setItemBrand(fork.zoho_item_id, brandId.Velocity);
+  // 'Bike Service Kit' matches no rule at all — mapped by hand.
+  const kit = db.prepare('SELECT zoho_item_id FROM items WHERE sku = ?').get('SVC-KIT');
+  if (kit) brandsService.setItemBrand(kit.zoho_item_id, brandId.Sundry);
+  // 'LED Head Light' is deliberately left unmapped so the Brands page has a row.
+
+  brandsService.remapItems(); // prove idempotency + manual preservation in the seed itself
+
+  // --- targets for the current month --------------------------------------
+  const month = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+  const TARGETS = [
+    [REPS[0].id, null, 900000],
+    [REPS[1].id, null, 750000],
+    [REPS[2].id, null, 600000],
+    [REPS[0].id, brandId.Battalion, 400000],
+    [REPS[1].id, brandId.Velocity, 300000],
+  ];
+  const upsertTarget = db.prepare(
+    `INSERT INTO targets (salesperson_id, month, brand_id, target_amount)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(salesperson_id, month, IFNULL(brand_id, 0))
+       DO UPDATE SET target_amount = excluded.target_amount, updated_at = datetime('now')`
+  );
+  db.transaction(() => {
+    for (const [rep, brand, amount] of TARGETS) upsertTarget.run(rep, month, brand, amount);
+  })();
+
+  // --- rep reassignments ---------------------------------------------------
+  const reassigned = [
+    { customer: customers[3], rep: REPS[1], mode: 'from_today', note: 'Territory swap — Priya takes over from today.' },
+    { customer: customers[4], rep: REPS[2], mode: 'all_history', note: 'Account was always Rahul’s; fixing history.' },
+  ];
+  const assignments = [];
+  for (const r of reassigned) {
+    db.prepare('DELETE FROM customer_rep_assignments WHERE customer_id = ?').run(r.customer.contact_id);
+    const result = attribution.assignCustomer(r.customer.contact_id, r.rep.id, r.mode, r.note);
+    assignments.push({ customer: r.customer.contact_name, rep: r.rep.name, mode: r.mode, id: result.assignment.id });
+  }
+
+  return {
+    brands: BRANDS.length,
+    rules: RULES.length,
+    mapping: brandsService.mappingStats(),
+    targets: TARGETS.length,
+    assignments,
+    month,
+  };
 }
 
 if (require.main === module) {

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import api from '../api.js';
 import { inr, inr0, fmtDate, num, timeAgo } from '../format.js';
 import { Card, KpiCard, Loading, ErrorBox, EmptyRow, StatusChip, ProgressBar } from '../components/ui.jsx';
+import { seriesColor } from '../charts.js';
 
 export default function Dashboard() {
   const { data, isLoading, error } = useQuery({
@@ -73,6 +74,8 @@ export default function Dashboard() {
           sub={`${num(k.mtdPayments.count)} payments`}
         />
       </div>
+
+      <MtdBrands data={data.mtdBrands} />
 
       <div className="two-col">
         <Card title="Top outstanding customers">
@@ -181,5 +184,64 @@ export default function Dashboard() {
         </div>
       </Card>
     </div>
+  );
+}
+
+/**
+ * Month-to-date sales split by brand. Derived from invoice line items, so
+ * invoices still waiting on their line-item sync are called out rather than
+ * silently dragging the split down.
+ */
+function MtdBrands({ data }) {
+  if (!data) return null;
+  const brands = data.brands || [];
+  const total = data.total || 0;
+
+  return (
+    <Card
+      title="This month by brand"
+      actions={
+        <Link className="btn ghost small" to="/performance">
+          Performance
+        </Link>
+      }
+    >
+      {brands.length ? (
+        <>
+          <div className="brand-bar" role="img" aria-label="Month-to-date sales split by brand">
+            {brands.map((b, i) => (
+              <span
+                key={b.brand_id ?? 'none'}
+                className="brand-bar-seg"
+                style={{ width: `${total > 0 ? (b.total / total) * 100 : 0}%`, background: seriesColor(i) }}
+                title={`${b.brand_name}: ${inr(b.total)}`}
+              />
+            ))}
+          </div>
+          <div className="brand-legend">
+            {brands.map((b, i) => (
+              <div key={b.brand_id ?? 'none'} className="brand-legend-item">
+                <span className="series-dot" style={{ background: seriesColor(i) }} />
+                <span className="brand-legend-name">{b.brand_name}</span>
+                <span className="brand-legend-value">{inr0(b.total)}</span>
+                <span className="brand-legend-pct">{total > 0 ? Math.round((b.total / total) * 100) : 0}%</span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <p className="muted-text">
+          No brand-attributed sales this month yet. Brand figures need synced invoice line items and at least one
+          mapped item — set the rules up on <Link className="link" to="/brands">Brands</Link>.
+        </p>
+      )}
+
+      {data.pendingInvoices ? (
+        <div className="banner warn">
+          {num(data.pendingInvoices)} invoice(s) worth {inr0(data.pendingAmount)} are pending line-item sync and are
+          not in this split.
+        </div>
+      ) : null}
+    </Card>
   );
 }

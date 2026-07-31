@@ -725,6 +725,19 @@ function recomputeCustomerInvoiceDates() {
   return info.changes;
 }
 
+/**
+ * Re-materialize item → brand after an item sync. Required lazily so the sync
+ * module stays importable on its own; never fatal to a sync run.
+ */
+function remapBrands() {
+  try {
+    return require('../services/brands').remapItems();
+  } catch (err) {
+    logger.error({ err: err.message }, 'brand remap after sync failed');
+    return { error: err.message };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // orchestration (serialized)
 // ---------------------------------------------------------------------------
@@ -777,6 +790,7 @@ async function _runSync({ entities, client, lineItemLimit } = {}) {
   }
 
   results.customersRecomputed = recomputeCustomerInvoiceDates();
+  results.brandsRemapped = remapBrands();
   results.finishedAt = new Date().toISOString();
   results.ok = results.errors.length === 0;
   return results;
@@ -872,6 +886,7 @@ module.exports = {
   syncInvoiceLineItems,
   lineItemProgress,
   recomputeCustomerInvoiceDates,
+  remapBrands,
   runSync,
   startSync,
   isRunning,
