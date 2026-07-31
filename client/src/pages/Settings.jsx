@@ -679,12 +679,28 @@ function ZohoTab() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['zoho-status'] }),
   });
 
+  const setWindow = useMutation({
+    mutationFn: (months) => api.put('/settings', { line_item_backfill_months: months }),
+    onSuccess: () => {
+      setWindowInput('');
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      queryClient.invalidateQueries({ queryKey: ['sync-status'] });
+    },
+  });
+
   const [form, setForm] = useState({ client_id: '', client_secret: '', grant_code: '' });
   const [budgetInput, setBudgetInput] = useState('');
+  const [windowInput, setWindowInput] = useState('');
 
   const status = statusQuery.data;
   const sync = syncQuery.data;
-  const lineItems = sync?.lineItems || { total: 0, synced: 0, pending: 0 };
+  const lineItems = sync?.lineItems || {
+    total: 0,
+    synced: 0,
+    pending: 0,
+    outsideWindow: 0,
+    windowMonths: 6,
+  };
   const apiCalls = status?.apiCalls || sync?.apiCalls || { used: 0, budget: 2000, remaining: 0 };
 
   return (
@@ -880,11 +896,48 @@ function ZohoTab() {
             max={lineItems.total}
             label={`line items synced ${num(lineItems.synced)} of ${num(lineItems.total)} invoices${
               lineItems.pending ? ` · ${num(lineItems.pending)} pending` : ''
-            }`}
+            }${lineItems.missing ? ` · ${num(lineItems.missing)} missing in Zoho` : ''}`}
           />
+
+          <form
+            className="inline-form"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const months = Number(windowInput);
+              if (Number.isInteger(months) && months >= 0 && months <= 120) setWindow.mutate(months);
+            }}
+          >
+            <label className="date-field">
+              Backfill window (months)
+              <input
+                type="number"
+                min="0"
+                max="120"
+                step="1"
+                placeholder={String(lineItems.windowMonths ?? 6)}
+                value={windowInput}
+                onChange={(e) => setWindowInput(e.target.value)}
+              />
+            </label>
+            <button type="submit" className="btn ghost" disabled={setWindow.isPending}>
+              {setWindow.isPending ? 'Saving…' : 'Update window'}
+            </button>
+            {setWindow.isError ? <span className="form-error">{setWindow.error.message}</span> : null}
+          </form>
+
+          {lineItems.outsideWindow > 0 ? (
+            <p className="muted-text">
+              Skipping {num(lineItems.outsideWindow)} older invoices (window:{' '}
+              {lineItems.windowMonths} months
+              {lineItems.cutoff ? `, on or after ${lineItems.cutoff}` : ''}). Raise the window to pull
+              them in — nothing is discarded.
+            </p>
+          ) : null}
+
           <p className="muted-text">
             Every invoice needs its own API call for line items, so the first backfill can take a few days
-            within the daily call budget. It resumes automatically on each sync, oldest invoices first.
+            within the daily call budget. It resumes automatically on each sync, newest invoices first.
+            Set the window to <strong>0</strong> to backfill every invoice regardless of age.
           </p>
         </div>
       </Card>

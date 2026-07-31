@@ -27,6 +27,8 @@ const router = express.Router();
 
 /** key → zod schema. Anything not listed here is neither read nor written. */
 const EDITABLE = {
+  // phase 1 — Zoho backfill window (0 = every invoice, however old)
+  line_item_backfill_months: z.coerce.number().int().min(0).max(120),
   // phase 3 — rule windows
   dormant_months: z.coerce.number().int().min(1).max(120),
   cheque_lead_days: z.coerce.number().int().min(0).max(60),

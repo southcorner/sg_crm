@@ -16,9 +16,15 @@
  * upserted by their Zoho id and the whole raw payload is kept in `raw_json`.
  *
  * Invoice line items are a second pass: the list endpoint has none, so every
- * invoice needs its own GET /invoices/{id}. Those are drained oldest-first
+ * invoice needs its own GET /invoices/{id}. Those are drained newest-first
  * inside the remaining daily API budget, and the pass is resumable — an invoice
  * is only marked `line_items_synced = 1` once its rows are committed.
+ *
+ * Only invoices inside the backfill window (`line_item_backfill_months`,
+ * default 6, 0 = unlimited) are queued: with tens of thousands of historical
+ * invoices, spending the daily budget on 2023 data would delay the current
+ * month's product/brand reporting by weeks. Out-of-window invoices keep
+ * `line_items_synced = 0`, so widening the setting re-queues them automatically.
  *
  * Only one sync may run at a time (in-process lock); a second request while a
  * run is in flight is reported back as skipped.
@@ -596,27 +602,71 @@ function replaceLineItems(invoiceId, lineItems) {
   tx(invoiceId, lineItems || []);
 }
 
+const DEFAULT_BACKFILL_MONTHS = 6;
+
+/** `line_item_backfill_months` clamped to 0–120; 0 means "no window". */
+function backfillWindowMonths() {
+  const raw = Number(config.getSetting('line_item_backfill_months', DEFAULT_BACKFILL_MONTHS));
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_BACKFILL_MONTHS;
+  return Math.min(120, Math.floor(raw));
+}
+
+/** Oldest invoice_date the backfill will touch ('YYYY-MM-DD'), or null if unlimited. */
+function backfillCutoff(months = backfillWindowMonths()) {
+  if (!months) return null;
+  return getDb().prepare(`SELECT date('now', ?) AS d`).get(`-${months} months`).d;
+}
+
+/**
+ * Backfill progress, scoped to the window: total/synced/pending/missing only
+ * count invoices the pass is willing to fetch. `outsideWindow` is how many
+ * unsynced invoices are being skipped because they are older than the cutoff
+ * (invoices with no date count as outside — they can never match the filter).
+ */
 function lineItemProgress() {
   const db = getDb();
+  const windowMonths = backfillWindowMonths();
+  const cutoff = backfillCutoff(windowMonths);
+
   const row = db
     .prepare(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN line_items_synced = 1 THEN 1 ELSE 0 END) AS synced,
               SUM(CASE WHEN line_items_synced = 0 THEN 1 ELSE 0 END) AS pending,
               SUM(CASE WHEN line_items_synced = 2 THEN 1 ELSE 0 END) AS missing
-         FROM invoices`
+         FROM invoices
+        ${cutoff ? 'WHERE invoice_date >= @cutoff' : ''}`
     )
-    .get();
-  const total = Number(row.total || 0);
-  const synced = Number(row.synced || 0);
-  const missing = Number(row.missing || 0);
-  return { total, synced, missing, pending: Number(row.pending || 0) };
+    .get(cutoff ? { cutoff } : {});
+
+  const outsideWindow = cutoff
+    ? db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM invoices
+            WHERE line_items_synced = 0 AND (invoice_date < @cutoff OR invoice_date IS NULL)`
+        )
+        .get({ cutoff }).n
+    : 0;
+
+  return {
+    total: Number(row.total || 0),
+    synced: Number(row.synced || 0),
+    missing: Number(row.missing || 0),
+    pending: Number(row.pending || 0),
+    outsideWindow: Number(outsideWindow || 0),
+    windowMonths,
+    cutoff,
+  };
 }
 
 /**
- * Drain the `line_items_synced = 0` queue oldest-first, one GET /invoices/{id}
+ * Drain the `line_items_synced = 0` queue newest-first, one GET /invoices/{id}
  * per invoice, stopping when the batch limit or the daily API budget runs out.
  * Resumable: each invoice is committed (rows + flag) in a single transaction.
+ *
+ * Newest-first so the current month's reporting becomes usable on day one.
+ * Invoices older than the backfill window are never queued and keep their
+ * `line_items_synced = 0` flag, so raising the window re-queues them as-is.
  */
 async function syncInvoiceLineItems({ client, limit = DEFAULT_LINE_ITEM_BATCH } = {}) {
   const api = client || createClient();
@@ -644,14 +694,16 @@ async function syncInvoiceLineItems({ client, limit = DEFAULT_LINE_ITEM_BATCH } 
     return { processed: 0, failed: 0, halted: before.pending > 0, ...before };
   }
 
+  const cutoff = before.cutoff;
   const pending = db
     .prepare(
       `SELECT zoho_invoice_id FROM invoices
         WHERE line_items_synced = 0
-        ORDER BY invoice_date ASC, zoho_invoice_id ASC
-        LIMIT ?`
+          ${cutoff ? 'AND invoice_date >= @cutoff' : ''}
+        ORDER BY invoice_date DESC, zoho_invoice_id DESC
+        LIMIT @take`
     )
-    .all(take);
+    .all(cutoff ? { take, cutoff } : { take });
 
   let processed = 0;
   let failed = 0;
@@ -711,7 +763,17 @@ async function syncInvoiceLineItems({ client, limit = DEFAULT_LINE_ITEM_BATCH } 
     total_pending: after.pending,
   });
 
-  logger.info({ processed, failed, halted, pending: after.pending }, 'invoice line-item pass done');
+  logger.info(
+    {
+      processed,
+      failed,
+      halted,
+      pending: after.pending,
+      outsideWindow: after.outsideWindow,
+      windowMonths: after.windowMonths,
+    },
+    'invoice line-item pass done'
+  );
   return { processed, failed, halted, ...after };
 }
 
@@ -900,6 +962,9 @@ module.exports = {
   syncEntity,
   syncInvoiceLineItems,
   lineItemProgress,
+  backfillWindowMonths,
+  backfillCutoff,
+  DEFAULT_BACKFILL_MONTHS,
   recomputeCustomerInvoiceDates,
   remapBrands,
   runSync,

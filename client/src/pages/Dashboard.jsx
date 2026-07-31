@@ -39,7 +39,14 @@ export default function Dashboard() {
       {data.sync.lineItems.pending > 0 ? (
         <div className="banner info">
           Invoice line items: {num(data.sync.lineItems.synced)} of {num(data.sync.lineItems.total)} invoices
-          backfilled · {num(data.sync.lineItems.pending)} pending.
+          backfilled · {num(data.sync.lineItems.pending)} pending
+          {data.sync.lineItems.windowMonths
+            ? ` (last ${data.sync.lineItems.windowMonths} months)`
+            : ''}
+          .
+          {data.sync.lineItems.outsideWindow > 0
+            ? ` ${num(data.sync.lineItems.outsideWindow)} older invoices are outside the backfill window.`
+            : ''}
         </div>
       ) : null}
 

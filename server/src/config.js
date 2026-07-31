@@ -107,6 +107,9 @@ const SETTING_DEFAULTS = {
   overdue_min_amount: 0,
   overdue_resend_days: 7,
   zoho_daily_call_budget: 2000,
+  // Only invoices dated within this many months get their line items pulled
+  // (one API call each). 0 = no limit. Widening it re-queues older invoices.
+  line_item_backfill_months: 6,
   sync_enabled: false,
   // WhatsApp (phase 5) — off until an admin pairs a phone in Settings. Boot
   // never launches puppeteer while this is false.

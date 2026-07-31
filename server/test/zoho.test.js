@@ -465,7 +465,7 @@ describe('sync: invoice line-item second pass', () => {
     assert.ok(client.__fetch.calls.every((c) => /\/books\/v3\/invoices\/I\d+$/.test(c.path)));
   });
 
-  test('drains oldest-first and is resumable across batches', async () => {
+  test('drains newest-first and is resumable across batches', async () => {
     seedInvoices(5);
     const client = makeClient(detailHandler);
 
@@ -477,11 +477,11 @@ describe('sync: invoice line-item second pass', () => {
       .prepare('SELECT zoho_invoice_id FROM invoices WHERE line_items_synced = 1 ORDER BY invoice_date')
       .all()
       .map((r) => r.zoho_invoice_id);
-    const oldest = getDb()
-      .prepare('SELECT zoho_invoice_id FROM invoices ORDER BY invoice_date ASC LIMIT 2')
+    const newest = getDb()
+      .prepare('SELECT zoho_invoice_id FROM invoices ORDER BY invoice_date DESC LIMIT 2')
       .all()
       .map((r) => r.zoho_invoice_id);
-    assert.deepEqual(doneIds.sort(), oldest.sort(), 'oldest invoices are drained first');
+    assert.deepEqual(doneIds.sort(), newest.sort(), 'newest invoices are drained first');
 
     const second = await sync.syncInvoiceLineItems({ client, limit: 10 });
     assert.equal(second.processed, 3);
@@ -520,7 +520,13 @@ describe('sync: invoice line-item second pass', () => {
     const client = makeClient(detailHandler);
     await sync.syncInvoiceLineItems({ client, limit: 1 });
     const progress = sync.lineItemProgress();
-    assert.deepEqual(progress, { total: 4, synced: 1, missing: 0, pending: 3 });
+    assert.equal(progress.total, 4);
+    assert.equal(progress.synced, 1);
+    assert.equal(progress.missing, 0);
+    assert.equal(progress.pending, 3);
+    assert.equal(progress.outsideWindow, 0);
+    assert.equal(progress.windowMonths, 6);
+    assert.match(progress.cutoff, /^\d{4}-\d{2}-\d{2}$/);
   });
 
   test('a 404 removes the invoice from the queue permanently instead of wedging it', async () => {
@@ -560,6 +566,184 @@ describe('sync: invoice line-item second pass', () => {
     const ghostIdx = Number(ghost.slice(1));
     sync.upsertInvoices([invoice(ghostIdx, { last_modified_time: '2026-08-01T09:00:00+0530' })]);
     assert.equal(sync.lineItemProgress().pending, 1);
+  });
+});
+
+describe('sync: line-item backfill window', () => {
+  const DEFAULT_MONTHS = 6;
+
+  function detailHandler({ path: p }) {
+    const id = p.split('/').pop();
+    return jsonResponse({
+      invoice: {
+        invoice_id: id,
+        line_items: [{ line_item_id: `${id}-L1`, name: 'Frame', quantity: 1, rate: 100, item_total: 100 }],
+      },
+    });
+  }
+
+  /** Run `fn` with the window setting temporarily changed. */
+  async function withWindow(months, fn) {
+    const previous = config.getSetting('line_item_backfill_months', DEFAULT_MONTHS);
+    config.setSetting('line_item_backfill_months', months);
+    try {
+      return await fn();
+    } finally {
+      config.setSetting('line_item_backfill_months', previous);
+    }
+  }
+
+  /** Two recent invoices (inside any sane window) and two from 2023. */
+  function seedMixed() {
+    sync.upsertInvoices([
+      invoice(1, { date: today(-2) }),
+      invoice(2, { date: today(-40) }),
+      invoice(3, { date: '2023-05-10' }),
+      invoice(4, { date: '2023-11-22' }),
+    ]);
+  }
+
+  function today(offsetDays = 0) {
+    const d = new Date(Date.now() + offsetDays * 86400000);
+    return d.toISOString().slice(0, 10);
+  }
+
+  const flagOf = (id) =>
+    getDb().prepare('SELECT line_items_synced FROM invoices WHERE zoho_invoice_id = ?').get(id)
+      .line_items_synced;
+
+  test('queues only invoices inside the window and leaves older ones untouched', async () => {
+    seedMixed();
+    const client = makeClient(detailHandler);
+
+    const result = await sync.syncInvoiceLineItems({ client, limit: 100 });
+
+    assert.equal(result.processed, 2, 'only the two in-window invoices are fetched');
+    assert.equal(client.__fetch.calls.length, 2, 'no API calls are spent on out-of-window invoices');
+    // the 2023 invoices keep line_items_synced = 0 so widening the window re-queues them
+    assert.equal(flagOf('I3'), 0);
+    assert.equal(flagOf('I4'), 0);
+    assert.equal(flagOf('I1'), 1);
+    assert.equal(flagOf('I2'), 1);
+  });
+
+  test('progress is scoped to the window and counts the skipped older invoices', async () => {
+    seedMixed();
+    const progress = sync.lineItemProgress();
+
+    assert.equal(progress.total, 2, 'total only counts in-window invoices');
+    assert.equal(progress.pending, 2);
+    assert.equal(progress.outsideWindow, 2);
+    assert.equal(progress.windowMonths, DEFAULT_MONTHS);
+    assert.ok(progress.cutoff < today(), 'cutoff is in the past');
+  });
+
+  test('an invoice with no date counts as outside the window', () => {
+    sync.upsertInvoices([invoice(1, { date: null })]);
+    const progress = sync.lineItemProgress();
+    assert.equal(progress.total, 0);
+    assert.equal(progress.pending, 0);
+    assert.equal(progress.outsideWindow, 1);
+  });
+
+  test('drains newest-first within the window', async () => {
+    seedMixed();
+    const client = makeClient(detailHandler);
+
+    await sync.syncInvoiceLineItems({ client, limit: 1 });
+
+    assert.equal(flagOf('I1'), 1, 'the most recent invoice goes first');
+    assert.equal(flagOf('I2'), 0);
+  });
+
+  test('window = 0 disables the filter (all invoices queued, still newest-first)', async () => {
+    await withWindow(0, async () => {
+      seedMixed();
+      const progress = sync.lineItemProgress();
+      assert.equal(progress.total, 4);
+      assert.equal(progress.pending, 4);
+      assert.equal(progress.outsideWindow, 0);
+      assert.equal(progress.windowMonths, 0);
+      assert.equal(progress.cutoff, null);
+
+      const client = makeClient(detailHandler);
+      await sync.syncInvoiceLineItems({ client, limit: 2 });
+
+      // newest-first regardless of the window being off
+      assert.equal(flagOf('I1'), 1);
+      assert.equal(flagOf('I2'), 1);
+      assert.equal(flagOf('I3'), 0);
+      assert.equal(flagOf('I4'), 0);
+    });
+  });
+
+  test('widening the window re-queues the older invoices automatically', async () => {
+    seedMixed();
+    const client = makeClient(detailHandler);
+    await sync.syncInvoiceLineItems({ client, limit: 100 });
+    assert.equal(sync.lineItemProgress().pending, 0, 'nothing left inside the 6-month window');
+
+    await withWindow(120, async () => {
+      const widened = sync.lineItemProgress();
+      assert.equal(widened.total, 4);
+      assert.equal(widened.pending, 2, 'the 2023 invoices are back in the queue');
+      assert.equal(widened.outsideWindow, 0);
+
+      const client2 = makeClient(detailHandler);
+      const result = await sync.syncInvoiceLineItems({ client: client2, limit: 100 });
+      assert.equal(result.processed, 2);
+      assert.equal(result.pending, 0);
+      assert.equal(flagOf('I3'), 1);
+      assert.equal(flagOf('I4'), 1);
+    });
+  });
+
+  test('out-of-window invoices alone do not report the pass as halted', async () => {
+    seedMixed();
+    const client = makeClient(detailHandler);
+    await sync.syncInvoiceLineItems({ client, limit: 100 });
+
+    // budget is gone, but nothing inside the window is pending → not halted
+    const broke = makeClient(detailHandler, { budget: 0 });
+    const result = await sync.syncInvoiceLineItems({ client: broke, limit: 100 });
+
+    assert.equal(result.processed, 0);
+    assert.equal(result.halted, false);
+    assert.equal(result.pending, 0);
+    assert.equal(result.outsideWindow, 2);
+    assert.equal(sync.getSyncState('invoice_details').last_status, 'ok');
+  });
+
+  test('a modified in-window invoice is re-queued and picked up by the next pass', async () => {
+    seedMixed();
+    const client = makeClient(detailHandler);
+    await sync.syncInvoiceLineItems({ client, limit: 100 });
+    assert.equal(sync.lineItemProgress().pending, 0);
+
+    // the incremental list sync sees I1 again with a newer last_modified_time
+    sync.upsertInvoices([
+      invoice(1, { date: today(-2), total: 4242, last_modified_time: '2026-08-01T09:00:00+0530' }),
+    ]);
+    assert.equal(flagOf('I1'), 0, 'the re-queue CASE in upsertInvoices cleared the flag');
+    assert.equal(sync.lineItemProgress().pending, 1);
+
+    const client2 = makeClient(detailHandler);
+    const result = await sync.syncInvoiceLineItems({ client: client2, limit: 100 });
+    assert.equal(result.processed, 1);
+    assert.equal(flagOf('I1'), 1);
+  });
+
+  test('the window setting is clamped to 0–120', async () => {
+    await withWindow(-5, () => {
+      assert.equal(sync.backfillWindowMonths(), 6, 'a negative window falls back to the default');
+    });
+    await withWindow(999, () => {
+      assert.equal(sync.backfillWindowMonths(), 120);
+    });
+    await withWindow(0, () => {
+      assert.equal(sync.backfillWindowMonths(), 0);
+      assert.equal(sync.backfillCutoff(), null);
+    });
   });
 });
 
@@ -647,7 +831,15 @@ describe('sync: orchestration', () => {
 
     assert.equal(invoices.rowCount, 2);
     assert.equal(invoices.cursor, '2026-07-25T12:00:00+0530');
-    assert.deepEqual(status.lineItems, { total: 2, synced: 1, missing: 0, pending: 1 });
+    assert.deepEqual(status.lineItems, {
+      total: 2,
+      synced: 1,
+      missing: 0,
+      pending: 1,
+      outsideWindow: 0,
+      windowMonths: 6,
+      cutoff: sync.backfillCutoff(6),
+    });
     assert.equal(typeof status.apiCalls.budget, 'number');
   });
 });
