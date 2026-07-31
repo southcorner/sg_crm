@@ -293,7 +293,11 @@ class ZohoClient {
     for (;;) {
       const payload = await this.get(path, { ...query, page, per_page: perPage });
       const key = listKey || guessListKey(payload);
-      const batch = (key && Array.isArray(payload[key]) ? payload[key] : []) || [];
+      let batch = key && Array.isArray(payload[key]) ? payload[key] : null;
+      // some endpoints (e.g. GET /salespersons) return their list under `data`
+      // instead of the entity name
+      if (!batch && Array.isArray(payload.data)) batch = payload.data;
+      batch = batch || [];
       pages += 1;
 
       if (onPage) await onPage(batch, { page, payload });

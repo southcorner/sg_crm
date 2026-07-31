@@ -383,6 +383,23 @@ describe('sync: entity list sync', () => {
     assert.equal(client2.__fetch.calls[0].query.last_modified_time, undefined);
   });
 
+  test('salespersons list arriving under `data` (real Zoho shape) still syncs', async () => {
+    // the live GET /salespersons response keys the array as `data`, not
+    // `salespersons` — regression test for the 0-rows-synced bug
+    const client = makeClient(() =>
+      jsonResponse(
+        page('data', [
+          { salesperson_id: 'SP7', salesperson_name: 'MR.SURESH', salesperson_email: 's@x.in' },
+        ], false, 1)
+      )
+    );
+    const result = await sync.syncEntity('salespersons', { client });
+
+    assert.equal(result.fetched, 1);
+    const row = getDb().prepare('SELECT * FROM salespersons WHERE zoho_salesperson_id = ?').get('SP7');
+    assert.equal(row.name, 'MR.SURESH');
+  });
+
   test('an edited invoice is re-queued for the line-item pass', async () => {
     const inv = invoice(1);
     const client = makeClient(() => jsonResponse(page('invoices', [inv], false, 1)));
