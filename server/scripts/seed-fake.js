@@ -1,0 +1,440 @@
+'use strict';
+
+/**
+ * DEV ONLY — fake data seeder.
+ *
+ * Fills the local database with plausible-looking customers, salespersons,
+ * items, invoices (with line items) and payments so the UI can be developed and
+ * verified without a live Zoho connection.
+ *
+ *   node server/scripts/seed-fake.js            # add fake rows
+ *   node server/scripts/seed-fake.js --reset    # wipe synced tables first
+ *
+ * NOTHING calls this automatically — it is never wired into the server boot,
+ * migrations or cron. It refuses to run when NODE_ENV=production unless
+ * ALLOW_FAKE_SEED=1 is set. All rows it writes carry a FAKE- id prefix so they
+ * are easy to spot (and delete) next to real Zoho data.
+ */
+
+const path = require('path');
+const config = require('../src/config');
+const { getDb, closeDb } = require('../src/db/connection');
+const { runMigrations } = require('../src/db/migrate');
+
+const PREFIX = 'FAKE-';
+
+if (config.isProduction && process.env.ALLOW_FAKE_SEED !== '1') {
+  console.error('refusing to seed fake data with NODE_ENV=production (set ALLOW_FAKE_SEED=1 to force)');
+  process.exit(1);
+}
+
+// deterministic PRNG so re-seeding gives the same shape of data
+let seed = 20260731;
+function rnd() {
+  seed = (seed * 1103515245 + 12345) % 2147483648;
+  return seed / 2147483648;
+}
+const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+const intBetween = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+const money = (a, b) => Math.round((a + rnd() * (b - a)) * 100) / 100;
+
+function isoDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+function daysAgo(n) {
+  const d = new Date();
+  d.setDate(d.getDate() - n);
+  return d;
+}
+function zohoTime(d) {
+  const ist = new Date(d.getTime() + 5.5 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${ist.getUTCFullYear()}-${p(ist.getUTCMonth() + 1)}-${p(ist.getUTCDate())}T${p(
+    ist.getUTCHours()
+  )}:${p(ist.getUTCMinutes())}:${p(ist.getUTCSeconds())}+0530`;
+}
+
+const REPS = [
+  { id: `${PREFIX}SP1`, name: 'Anil Mehta', email: 'anil@example.in' },
+  { id: `${PREFIX}SP2`, name: 'Priya Nair', email: 'priya@example.in' },
+  { id: `${PREFIX}SP3`, name: 'Rahul Desai', email: 'rahul@example.in' },
+];
+
+const CUSTOMER_NAMES = [
+  ['Sharma Cycle Mart', 'Sharma Cycle Mart Pvt Ltd', 'Pune'],
+  ['Velocity Bikes', 'Velocity Bikes LLP', 'Mumbai'],
+  ['Gearhead Sports', 'Gearhead Sports Pvt Ltd', 'Bengaluru'],
+  ['Trailblazer Cycles', 'Trailblazer Cycles', 'Hyderabad'],
+  ['Metro Wheels', 'Metro Wheels Trading Co', 'Delhi'],
+  ['Peak Performance Store', 'Peak Performance Retail', 'Chandigarh'],
+  ['Coastal Cyclery', 'Coastal Cyclery Pvt Ltd', 'Kochi'],
+  ['Urban Ride Hub', 'Urban Ride Hub', 'Ahmedabad'],
+  ['Summit Sports House', 'Summit Sports House Pvt Ltd', 'Jaipur'],
+  ['Rapid Gear Traders', 'Rapid Gear Traders', 'Nagpur'],
+];
+
+const ITEMS = [
+  ['Alloy MTB Frame 18"', 'FRM-MTB-18', 'Frames', 8500],
+  ['Carbon Road Fork', 'FRK-RD-CB', 'Frames', 12500],
+  ['Hydraulic Disc Brake Set', 'BRK-HYD-SET', 'Components', 4200],
+  ['11-Speed Cassette', 'CST-11S', 'Components', 2800],
+  ['Tubeless Tyre 29x2.2', 'TYR-29-22', 'Tyres', 1950],
+  ['Helmet Pro Vent', 'HLM-PRO', 'Accessories', 2400],
+  ['LED Head Light 800L', 'LGT-800', 'Accessories', 1600],
+  ['Bike Service Kit', 'SVC-KIT', 'Accessories', 990],
+];
+
+const PAYMENT_MODES = ['cash', 'banktransfer', 'cheque', 'upi'];
+
+function reset(db) {
+  const tables = [
+    'invoice_line_items',
+    'payments',
+    'invoices',
+    'items',
+    'customers',
+    'salespersons',
+    'sync_state',
+  ];
+  db.exec('PRAGMA foreign_keys = OFF');
+  for (const t of tables) db.prepare(`DELETE FROM ${t}`).run();
+  db.exec('PRAGMA foreign_keys = ON');
+  console.log(`reset: cleared ${tables.join(', ')}`);
+}
+
+function seedAll({ doReset = false } = {}) {
+  runMigrations();
+  config.seedSettingDefaults();
+  const db = getDb();
+  if (doReset) reset(db);
+
+  const sync = require('../src/zoho/sync');
+
+  // --- salespersons -------------------------------------------------------
+  sync.upsertSalespersons(
+    REPS.map((r) => ({
+      salesperson_id: r.id,
+      salesperson_name: r.name,
+      salesperson_email: r.email,
+      status: 'active',
+      last_modified_time: zohoTime(daysAgo(120)),
+    }))
+  );
+
+  // --- items --------------------------------------------------------------
+  const items = ITEMS.map(([name, sku, category, rate], idx) => ({
+    item_id: `${PREFIX}ITM${idx + 1}`,
+    name,
+    sku,
+    category_name: category,
+    unit: 'nos',
+    rate,
+    status: 'active',
+    product_type: 'goods',
+    custom_fields: [{ label: 'Brand', value: category === 'Frames' ? 'Battalion' : 'Sundry' }],
+    last_modified_time: zohoTime(daysAgo(90)),
+  }));
+  sync.upsertItems(items);
+
+  // --- customers ----------------------------------------------------------
+  const customers = CUSTOMER_NAMES.map(([name, company, city], idx) => ({
+    contact_id: `${PREFIX}CUST${idx + 1}`,
+    contact_name: name,
+    company_name: company,
+    email: `${name.toLowerCase().replace(/[^a-z]+/g, '.')}@example.in`,
+    phone: `020-${intBetween(2000000, 4999999)}`,
+    mobile: `9${intBetween(100000000, 999999999)}`,
+    contact_type: 'customer',
+    status: idx === 9 ? 'inactive' : 'active',
+    gst_no: `27AAAAA${intBetween(1000, 9999)}A1Z${intBetween(1, 9)}`,
+    place_of_contact: city,
+    currency_code: 'INR',
+    payment_terms: pick([15, 30, 45]),
+    payment_terms_label: 'Net 30',
+    outstanding_receivable: 0,
+    unused_credits_receivable_amount: 0,
+    billing_address: {
+      address: `${intBetween(1, 200)} MG Road`,
+      city,
+      state: 'Maharashtra',
+      zip: String(intBetween(400001, 499999)),
+      country: 'India',
+    },
+    shipping_address: { address: `Warehouse ${idx + 1}`, city, country: 'India' },
+    last_modified_time: zohoTime(daysAgo(intBetween(1, 60))),
+  }));
+  sync.upsertCustomers(customers);
+
+  // --- invoices + line items ---------------------------------------------
+  const invoices = [];
+  const lineItemsByInvoice = new Map();
+
+  for (let i = 0; i < 30; i += 1) {
+    const customer = customers[i % customers.length];
+    const rep = REPS[i % REPS.length];
+    const ageDays = intBetween(1, 200);
+    const date = daysAgo(ageDays);
+    const terms = 30;
+    const due = new Date(date.getTime() + terms * 86400000);
+
+    const lines = [];
+    const lineCount = intBetween(1, 4);
+    let subTotal = 0;
+    for (let l = 0; l < lineCount; l += 1) {
+      const item = items[(i + l) % items.length];
+      const qty = intBetween(1, 6);
+      const rate = item.rate;
+      const itemTotal = Math.round(qty * rate * 100) / 100;
+      subTotal += itemTotal;
+      lines.push({
+        line_item_id: `${PREFIX}LI${i + 1}-${l + 1}`,
+        item_id: item.item_id,
+        name: item.name,
+        description: `${item.name} — ${item.category_name}`,
+        sku: item.sku,
+        quantity: qty,
+        unit: 'nos',
+        rate,
+        discount_amount: 0,
+        item_total: itemTotal,
+      });
+    }
+    const total = Math.round(subTotal * 1.18 * 100) / 100; // 18% GST
+
+    // mix of paid / partially paid / overdue / draft / void
+    let status;
+    let balance;
+    const roll = i % 10;
+    if (roll === 0) {
+      status = 'draft';
+      balance = total;
+    } else if (roll === 1) {
+      status = 'void';
+      balance = 0;
+    } else if (roll < 5) {
+      status = 'paid';
+      balance = 0;
+    } else if (roll < 7) {
+      status = 'partially_paid';
+      balance = Math.round(total * 0.4 * 100) / 100;
+    } else {
+      status = due < new Date() ? 'overdue' : 'sent';
+      balance = total;
+    }
+
+    const invoiceId = `${PREFIX}INV${i + 1}`;
+    invoices.push({
+      invoice_id: invoiceId,
+      invoice_number: `INV-${String(1000 + i)}`,
+      customer_id: customer.contact_id,
+      customer_name: customer.contact_name,
+      salesperson_id: rep.id,
+      salesperson_name: rep.name,
+      date: isoDate(date),
+      due_date: isoDate(due),
+      status,
+      total,
+      sub_total: Math.round(subTotal * 100) / 100,
+      balance,
+      currency_code: 'INR',
+      reference_number: `PO-${intBetween(100, 999)}`,
+      last_modified_time: zohoTime(daysAgo(Math.max(0, ageDays - 1))),
+    });
+    lineItemsByInvoice.set(invoiceId, lines);
+  }
+
+  // a couple of guaranteed current-month invoices so the MTD KPI is non-zero
+  for (let i = 0; i < 3; i += 1) {
+    const customer = customers[i];
+    const rep = REPS[i % REPS.length];
+    const d = new Date();
+    d.setDate(Math.min(d.getDate(), 3 + i * 2));
+    const due = new Date(d.getTime() + 30 * 86400000);
+    const item = items[i];
+    const qty = intBetween(2, 8);
+    const subTotal = qty * item.rate;
+    const total = Math.round(subTotal * 1.18 * 100) / 100;
+    const invoiceId = `${PREFIX}INV-MTD${i + 1}`;
+    invoices.push({
+      invoice_id: invoiceId,
+      invoice_number: `INV-${String(2000 + i)}`,
+      customer_id: customer.contact_id,
+      customer_name: customer.contact_name,
+      salesperson_id: rep.id,
+      salesperson_name: rep.name,
+      date: isoDate(d),
+      due_date: isoDate(due),
+      status: 'sent',
+      total,
+      sub_total: subTotal,
+      balance: total,
+      currency_code: 'INR',
+      reference_number: `PO-${intBetween(100, 999)}`,
+      last_modified_time: zohoTime(new Date()),
+    });
+    lineItemsByInvoice.set(invoiceId, [
+      {
+        line_item_id: `${PREFIX}LI-MTD${i + 1}`,
+        item_id: item.item_id,
+        name: item.name,
+        description: item.name,
+        sku: item.sku,
+        quantity: qty,
+        unit: 'nos',
+        rate: item.rate,
+        discount_amount: 0,
+        item_total: subTotal,
+      },
+    ]);
+  }
+
+  sync.upsertInvoices(invoices);
+
+  // line items: same path the real second pass uses, so flags line up
+  const insertLines = db.transaction(() => {
+    for (const [invoiceId, lines] of lineItemsByInvoice) {
+      db.prepare('DELETE FROM invoice_line_items WHERE invoice_id = ?').run(invoiceId);
+      lines.forEach((li, idx) => {
+        db.prepare(
+          `INSERT INTO invoice_line_items (
+             zoho_line_item_id, invoice_id, item_id, line_order, name, description, sku,
+             quantity, unit, rate, discount_amount, item_total, raw_json
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          li.line_item_id,
+          invoiceId,
+          li.item_id,
+          idx,
+          li.name,
+          li.description,
+          li.sku,
+          li.quantity,
+          li.unit,
+          li.rate,
+          li.discount_amount,
+          li.item_total,
+          JSON.stringify(li)
+        );
+      });
+    }
+  });
+  insertLines();
+
+  // leave the last 4 invoices unsynced so the backfill progress bar has something to show
+  const unsynced = invoices.slice(-4).map((i) => i.invoice_id);
+  const markSynced = db.prepare(
+    `UPDATE invoices SET line_items_synced = 1, line_items_synced_at = datetime('now') WHERE zoho_invoice_id = ?`
+  );
+  const markUnsynced = db.prepare(
+    'UPDATE invoices SET line_items_synced = 0, line_items_synced_at = NULL WHERE zoho_invoice_id = ?'
+  );
+  db.transaction(() => {
+    for (const inv of invoices) markSynced.run(inv.invoice_id);
+    for (const id of unsynced) markUnsynced.run(id);
+  })();
+
+  // --- payments -----------------------------------------------------------
+  const payments = [];
+  let pNo = 1;
+  for (const inv of invoices) {
+    if (inv.status !== 'paid' && inv.status !== 'partially_paid') continue;
+    const applied = Math.round((inv.total - inv.balance) * 100) / 100;
+    if (applied <= 0) continue;
+    const payDate = new Date(new Date(inv.date).getTime() + intBetween(3, 25) * 86400000);
+    const when = payDate > new Date() ? new Date() : payDate;
+    payments.push({
+      payment_id: `${PREFIX}PAY${pNo}`,
+      payment_number: `PMT-${String(500 + pNo)}`,
+      customer_id: inv.customer_id,
+      customer_name: inv.customer_name,
+      date: isoDate(when),
+      amount: applied,
+      unused_amount: 0,
+      bank_charges: 0,
+      payment_mode: pick(PAYMENT_MODES),
+      reference_number: `REF${intBetween(10000, 99999)}`,
+      description: `Payment against ${inv.invoice_number}`,
+      invoices: [
+        {
+          invoice_id: inv.invoice_id,
+          invoice_number: inv.invoice_number,
+          amount_applied: applied,
+          date: isoDate(when),
+        },
+      ],
+      last_modified_time: zohoTime(when),
+    });
+    pNo += 1;
+  }
+  // one current-month payment so the dashboard MTD payment tile is non-zero
+  const firstCustomer = customers[0];
+  payments.push({
+    payment_id: `${PREFIX}PAY-MTD`,
+    payment_number: `PMT-${String(500 + pNo)}`,
+    customer_id: firstCustomer.contact_id,
+    customer_name: firstCustomer.contact_name,
+    date: isoDate(new Date()),
+    amount: money(25000, 90000),
+    unused_amount: 0,
+    bank_charges: 0,
+    payment_mode: 'banktransfer',
+    reference_number: `REF${intBetween(10000, 99999)}`,
+    description: 'On-account payment',
+    invoices: [],
+    last_modified_time: zohoTime(new Date()),
+  });
+  sync.upsertPayments(payments);
+
+  // --- derived + sync_state so the Settings page has something to render ---
+  sync.recomputeCustomerInvoiceDates();
+
+  db.prepare(
+    `UPDATE customers SET outstanding_receivable = (
+       SELECT COALESCE(SUM(balance), 0) FROM invoices i
+        WHERE i.customer_id = customers.zoho_contact_id
+          AND i.status NOT IN ('void', 'draft'))`
+  ).run();
+
+  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  for (const entity of ['salespersons', 'items', 'customers', 'invoices', 'payments']) {
+    sync.updateSyncState(entity, {
+      cursor: zohoTime(new Date()),
+      last_run_at: now,
+      last_status: 'ok',
+      last_error: null,
+      records_synced: 0,
+      total_pending: 0,
+    });
+  }
+  const progress = sync.lineItemProgress();
+  sync.updateSyncState('invoice_details', {
+    last_run_at: now,
+    last_status: 'ok',
+    records_synced: progress.synced,
+    total_pending: progress.pending,
+  });
+
+  const counts = {
+    customers: db.prepare('SELECT COUNT(*) AS n FROM customers').get().n,
+    salespersons: db.prepare('SELECT COUNT(*) AS n FROM salespersons').get().n,
+    items: db.prepare('SELECT COUNT(*) AS n FROM items').get().n,
+    invoices: db.prepare('SELECT COUNT(*) AS n FROM invoices').get().n,
+    invoice_line_items: db.prepare('SELECT COUNT(*) AS n FROM invoice_line_items').get().n,
+    payments: db.prepare('SELECT COUNT(*) AS n FROM payments').get().n,
+  };
+
+  console.log(`fake seed complete (db: ${path.relative(config.ROOT_DIR, config.DB_PATH)})`);
+  console.table(counts);
+  console.log(`line items: ${progress.synced}/${progress.total} invoices synced`);
+  return counts;
+}
+
+if (require.main === module) {
+  try {
+    seedAll({ doReset: process.argv.includes('--reset') });
+  } finally {
+    closeDb();
+  }
+}
+
+module.exports = { seedAll, PREFIX };

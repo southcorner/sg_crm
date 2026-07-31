@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon --watch src src/index.js",
-    "migrate": "node src/db/migrate.js"
+    "migrate": "node src/db/migrate.js",
+    "test": "node --test \"test/*.test.js\"",
+    "seed:fake": "node scripts/seed-fake.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
