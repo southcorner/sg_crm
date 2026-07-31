@@ -763,7 +763,14 @@ function seedPhase3(db, { customers }) {
 
 if (require.main === module) {
   try {
-    seedAll({ doReset: process.argv.includes('--reset') });
+    if (process.argv.includes('--reset-only')) {
+      // wipe fake/synced data (and sync cursors) WITHOUT re-seeding — the step
+      // to run right before connecting a real Zoho org
+      runMigrations();
+      reset(getDb());
+    } else {
+      seedAll({ doReset: process.argv.includes('--reset') });
+    }
   } finally {
     closeDb();
   }

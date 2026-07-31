@@ -28,7 +28,7 @@ const { getDb } = require('../db/connection');
 const config = require('../config');
 const logger = require('../logger');
 const auth = require('./auth');
-const { ZohoClient, BudgetExceededError } = require('./client');
+const { ZohoClient, BudgetExceededError, ZohoApiError } = require('./client');
 
 const OVERLAP_MS = 5 * 60 * 1000; // 5-minute re-read window
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -601,13 +601,16 @@ function lineItemProgress() {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN line_items_synced = 1 THEN 1 ELSE 0 END) AS synced
+              SUM(CASE WHEN line_items_synced = 1 THEN 1 ELSE 0 END) AS synced,
+              SUM(CASE WHEN line_items_synced = 0 THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN line_items_synced = 2 THEN 1 ELSE 0 END) AS missing
          FROM invoices`
     )
     .get();
   const total = Number(row.total || 0);
   const synced = Number(row.synced || 0);
-  return { total, synced, pending: Math.max(0, total - synced) };
+  const missing = Number(row.missing || 0);
+  return { total, synced, missing, pending: Number(row.pending || 0) };
 }
 
 /**
@@ -667,6 +670,18 @@ async function syncInvoiceLineItems({ client, limit = DEFAULT_LINE_ITEM_BATCH } 
         halted = true;
         lastError = err.message;
         break;
+      }
+      // Zoho no longer has this invoice (deleted, or a stale/foreign id such as
+      // leftover seed data). Retrying can never succeed and would wedge the
+      // queue, so take it out permanently (line_items_synced = 2). A later list
+      // sync that sees the id again with a new last_modified_time re-queues it.
+      if (err instanceof ZohoApiError && err.status === 404) {
+        db.prepare(
+          `UPDATE invoices SET line_items_synced = 2, line_items_synced_at = datetime('now')
+            WHERE zoho_invoice_id = ?`
+        ).run(id);
+        logger.warn({ invoiceId: id }, 'invoice not found in Zoho; removed from line-item queue');
+        continue;
       }
       failed += 1;
       lastError = err.message;

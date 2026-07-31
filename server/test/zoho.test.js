@@ -503,7 +503,46 @@ describe('sync: invoice line-item second pass', () => {
     const client = makeClient(detailHandler);
     await sync.syncInvoiceLineItems({ client, limit: 1 });
     const progress = sync.lineItemProgress();
-    assert.deepEqual(progress, { total: 4, synced: 1, pending: 3 });
+    assert.deepEqual(progress, { total: 4, synced: 1, missing: 0, pending: 3 });
+  });
+
+  test('a 404 removes the invoice from the queue permanently instead of wedging it', async () => {
+    seedInvoices(3);
+    const ghost = getDb()
+      .prepare('SELECT zoho_invoice_id FROM invoices ORDER BY invoice_date ASC LIMIT 1')
+      .get().zoho_invoice_id;
+    const client = makeClient(({ path: p }) => {
+      const id = p.split('/').pop();
+      if (id === ghost) {
+        return jsonResponse(
+          { code: 1002, message: "We couldn't find any resource for the given ID." },
+          { status: 404 }
+        );
+      }
+      return detailHandler({ path: p });
+    });
+
+    const result = await sync.syncInvoiceLineItems({ client });
+
+    assert.equal(result.processed, 2, 'the other invoices still sync');
+    assert.equal(result.failed, 0, 'a 404 is a skip, not a failure');
+    assert.equal(result.pending, 0);
+    assert.equal(result.missing, 1);
+    assert.equal(
+      getDb().prepare('SELECT line_items_synced FROM invoices WHERE zoho_invoice_id = ?').get(ghost)
+        .line_items_synced,
+      2
+    );
+
+    // re-running does not touch the missing invoice again
+    const rerun = await sync.syncInvoiceLineItems({ client });
+    assert.equal(rerun.processed, 0);
+    assert.equal(rerun.missing, 1);
+
+    // but if a list sync sees it again with a new last_modified_time, it re-queues
+    const ghostIdx = Number(ghost.slice(1));
+    sync.upsertInvoices([invoice(ghostIdx, { last_modified_time: '2026-08-01T09:00:00+0530' })]);
+    assert.equal(sync.lineItemProgress().pending, 1);
   });
 });
 
@@ -591,7 +630,7 @@ describe('sync: orchestration', () => {
 
     assert.equal(invoices.rowCount, 2);
     assert.equal(invoices.cursor, '2026-07-25T12:00:00+0530');
-    assert.deepEqual(status.lineItems, { total: 2, synced: 1, pending: 1 });
+    assert.deepEqual(status.lineItems, { total: 2, synced: 1, missing: 0, pending: 1 });
     assert.equal(typeof status.apiCalls.budget, 'number');
   });
 });
