@@ -10,6 +10,9 @@ node_modules/
 # client build output
 client/dist/
 
+# setup exe produced by scripts/build-installer.ps1
+dist-installer/
+
 # logs
 *.log
 npm-debug.log*

@@ -29,7 +29,12 @@ C:\sg_crm\
 ├── .env                      secrets & machine config (gitignored; see .env.example)
 ├── scripts\
 │   ├── install-service.ps1   install/remove the NSSM Windows service
-│   └── backup-db.ps1         nightly VACUUM INTO backup + retention
+│   ├── backup-db.ps1         nightly VACUUM INTO backup + retention
+│   ├── build-installer.ps1   build dist-installer\sg_crm-setup.exe (IExpress)
+│   └── installer\            what goes inside that exe:
+│       ├── install.cmd       bootstrap run by the exe
+│       ├── install.ps1       Node check, in-place update, npm install, launch
+│       └── start-server.cmd  runs the server in a window (no service case)
 ├── server\
 │   ├── src\
 │   │   ├── index.js          boot, Express app, graceful shutdown
@@ -46,6 +51,7 @@ C:\sg_crm\
 │   └── test\                 node:test suites (phase2..phase6, zoho)
 ├── client\src\               React 18 + Vite: pages\, components\, api.js
 ├── client\dist\              build output, served in production (gitignored)
+├── dist-installer\           sg_crm-setup.exe (gitignored)
 └── data\                     runtime, gitignored
     ├── crm.db (+ -wal, -shm)
     ├── backups\crm-YYYYMMDD-HHMMSS.db
@@ -121,6 +127,72 @@ Finally, open port 3000 to the LAN if other machines need the UI:
 ```powershell
 New-NetFirewallRule -DisplayName "SG CRM" -Direction Inbound -LocalPort 3000 -Protocol TCP -Action Allow
 ```
+
+### 3.1 Deploying with the setup exe
+
+Everything above is the from-source route. Day to day there is a shorter one:
+**one file, copied to the server and double-clicked.**
+
+**On the build machine** (any checkout of this repo):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\sg_crm\scripts\build-installer.ps1
+# or: npm run installer
+```
+
+That builds the client, packs every git-tracked file plus `client\dist` into
+`payload.zip`, and wraps it with `install.cmd` / `install.ps1` / `version.txt`
+into `dist-installer\sg_crm-setup.exe` using **IExpress**, which ships with
+Windows — no extra toolchain. The exe is about **0.7 MB** (source plus the
+bundled client; `node_modules` is fetched on the target, not shipped). The
+version stamped into it is the build date plus the git short hash, with
+`-dirty` appended when the working tree has uncommitted changes; it is printed
+during setup and written to `VERSION.txt` in the install directory.
+
+**On the live server:** copy `sg_crm-setup.exe` across and run it. It opens a
+console, reports each step, and stays open at the end so you can read it.
+
+1. Checks for **Node.js >= 22**. If it is missing or too old it tries
+   `winget install OpenJS.NodeJS.LTS --silent`, and failing that downloads a
+   pinned Node 22 LTS x64 MSI from nodejs.org and runs it (UAC prompt), then
+   refreshes PATH for itself.
+2. Installs to `C:\sg_crm`, or to whatever `SGCRM_DIR` is set to.
+3. **Update mode** when the directory already has a `package.json`: app files
+   are mirrored over, including deleting files that were removed upstream, but
+   `data\`, `.env`, `node_modules\`, `.git\`, `dist-installer\` and `tools\` are
+   excluded and never touched. **Fresh mode** otherwise: it creates the
+   directory and writes `.env` from `.env.example` with `NODE_ENV=production`
+   and a freshly generated 32-byte `SESSION_SECRET`, then warns that the admin
+   account will be `admin` / `admin123`.
+4. Runs `npm install --omit=dev` (quick when nothing changed).
+5. If an `SgCrm` service exists it restarts it and says so; otherwise it opens a
+   new terminal window running the server (`scripts\installer\start-server.cmd`).
+   Closing that window stops the CRM, so a real deployment should install the
+   service once with `scripts\install-service.ps1`.
+
+Database migrations apply themselves at boot, so the patch is complete as soon
+as the server is back up. Anything that fails leaves the window open with the
+error and exits non-zero, having launched nothing.
+
+**What survives a patch:** the database and everything else under `data\`
+(including `wwebjs\` and `backups\`), your `.env` — so `SESSION_SECRET`, SMTP
+credentials and `PORT` are all kept — and `node_modules\`. Which means the Zoho
+connection, WhatsApp pairing, settings, targets and reminder history all carry
+straight over; there is nothing to reconnect after an update.
+
+**First install on a new machine:** run the exe, then follow §5 from the top
+(log in, change the password, connect Zoho, and so on). If you are moving an
+existing deployment, install with the exe and then copy the old `data\` folder
+and `.env` in on top before starting the server — the CRM will come up already
+connected.
+
+Useful environment variables when scripting it:
+
+| Variable | Effect |
+|---|---|
+| `SGCRM_DIR` | Install somewhere other than `C:\sg_crm` |
+| `SGCRM_NO_LAUNCH=1` | Do everything except starting the server |
+| `SGCRM_NO_PAUSE=1` | Do not wait for a keypress at the end |
 
 ---
 
