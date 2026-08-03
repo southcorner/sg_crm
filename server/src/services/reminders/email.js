@@ -159,6 +159,33 @@ async function sendTestEmail(to) {
   return { ok: true, to, messageId: info.messageId || null, accepted: info.accepted || [], response: info.response || null };
 }
 
+/**
+ * One mail to a list of recipients who must not see each other — the dealer
+ * stock report. Everyone goes in Bcc and the From address is its own To, which
+ * is what every mailer does for a bulk send and keeps the message RFC-valid
+ * (a message with no To at all trips some spam filters).
+ */
+async function sendBcc(recipients, subject, html, text) {
+  const list = (Array.isArray(recipients) ? recipients : [recipients])
+    .map((r) => String(r || '').trim())
+    .filter(Boolean);
+  if (!list.length) throw httpError(400, 'no recipient addresses');
+
+  const transport = getTransport();
+  const from = fromAddress();
+  const info = await transport.sendMail({
+    from,
+    to: from,
+    bcc: list,
+    subject,
+    ...(text ? { text } : {}),
+    ...(html ? { html } : {}),
+  });
+
+  logger.debug({ bcc: list.length, subject, messageId: info.messageId }, 'bulk email sent');
+  return info;
+}
+
 module.exports = {
   smtpConfig,
   status,
@@ -167,6 +194,7 @@ module.exports = {
   resetTransport,
   fromAddress,
   sendEmail,
+  sendBcc,
   verifyConnection,
   sendTestEmail,
 };

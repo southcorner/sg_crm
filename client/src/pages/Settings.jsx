@@ -21,7 +21,9 @@ export default function Settings() {
     <div className="page">
       <header className="page-header">
         <h1>Settings</h1>
-        <p className="page-sub">Zoho connection, sync control, the daily reminder digest and the WhatsApp session.</p>
+        <p className="page-sub">
+          Zoho connection, sync control, the daily reminder digest, the dealer stock report and the WhatsApp session.
+        </p>
       </header>
 
       <Tabs
@@ -30,6 +32,7 @@ export default function Settings() {
         tabs={[
           { key: 'zoho', label: 'Zoho' },
           { key: 'reminders', label: 'Reminders' },
+          { key: 'stock', label: 'Stock Report' },
           { key: 'whatsapp', label: 'WhatsApp' },
           { key: 'account', label: 'Security' },
         ]}
@@ -38,8 +41,327 @@ export default function Settings() {
       {tab === 'zoho' && <ZohoTab />}
       {tab === 'whatsapp' && <WhatsAppTab />}
       {tab === 'reminders' && <RemindersTab />}
+      {tab === 'stock' && <StockReportTab />}
       {tab === 'account' && <SecurityTab />}
     </div>
+  );
+}
+
+/**
+ * The daily dealer stock report.
+ *
+ * This one goes to CUSTOMERS, so the tab leads with the two things that matter
+ * to whoever switches it on: who receives it, and the threshold above which a
+ * quantity is hidden behind "Available". The preview is the real composer, so
+ * what is rendered here is byte-for-byte what the dealers get.
+ */
+function StockReportTab() {
+  const queryClient = useQueryClient();
+  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings') });
+  const optionsQuery = useQuery({ queryKey: ['stock-report-options'], queryFn: () => api.get('/stock-report/options') });
+
+  const [draft, setDraft] = useState(null);
+  const [recipientInput, setRecipientInput] = useState('');
+  const [preview, setPreview] = useState(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const save = useMutation({
+    mutationFn: (body) => api.put('/settings', body),
+    onSuccess: (res) => {
+      setDraft(null);
+      queryClient.setQueryData(['settings'], res);
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      queryClient.invalidateQueries({ queryKey: ['stock-report-options'] });
+    },
+  });
+
+  const runPreview = useMutation({
+    mutationFn: () => api.get(`/stock-report/preview${previewQuery()}`),
+    onSuccess: (res) => setPreview(res),
+  });
+
+  const sendNow = useMutation({
+    mutationFn: (force) => api.post('/stock-report/send', { force: Boolean(force) }),
+    onSuccess: () => {
+      setConfirming(false);
+      queryClient.invalidateQueries({ queryKey: ['reminders-log'] });
+      queryClient.invalidateQueries({ queryKey: ['settings'] });
+    },
+  });
+
+  if (settingsQuery.isLoading) return <Loading />;
+
+  const settings = settingsQuery.data?.settings || {};
+  const smtp = settingsQuery.data?.smtp || {};
+  const cron = settingsQuery.data?.cron || {};
+  const brands = optionsQuery.data?.brands || [];
+  const categories = optionsQuery.data?.categories || [];
+
+  const value = (key) => (draft && draft[key] !== undefined ? draft[key] : settings[key]);
+  const set = (key, v) => setDraft((d) => ({ ...(d || {}), [key]: v }));
+  const asList = (key) => {
+    const v = value(key);
+    return Array.isArray(v) ? v : [];
+  };
+  const recipients = asList('stock_report_recipients');
+  const excludedBrands = asList('stock_report_excluded_brands').map(Number);
+  const excludedCategories = asList('stock_report_excluded_categories').map(String);
+
+  function previewQuery() {
+    const params = new URLSearchParams();
+    params.set('threshold', String(Number(value('stock_report_threshold')) || 25));
+    for (const id of excludedBrands) params.append('excluded_brands', String(id));
+    for (const c of excludedCategories) params.append('excluded_categories', c);
+    return `?${params.toString()}`;
+  }
+
+  const toggle = (key, item, list) =>
+    set(key, list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
+
+  function addRecipient() {
+    const value_ = recipientInput.trim();
+    if (!value_) return;
+    // one paste of "a@x.in, b@x.in" should not become one bogus address
+    const added = value_.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+    set('stock_report_recipients', [...new Set([...recipients, ...added])]);
+    setRecipientInput('');
+  }
+
+  const enabled = Boolean(value('stock_report_enabled'));
+  const cronJob = (cron.jobs || []).find((j) => j.name === 'stock_report');
+
+  return (
+    <>
+      <ErrorBox error={settingsQuery.error || save.error || runPreview.error || sendNow.error} />
+
+      {!smtp.configured ? (
+        <Banner tone="warn">
+          SMTP is not configured — the report cannot be delivered. Set the mail server under the{' '}
+          <strong>Reminders</strong> tab.
+        </Banner>
+      ) : null}
+      {enabled && !recipients.length ? (
+        <Banner tone="warn">The report is switched on but has no recipients, so nothing will be sent.</Banner>
+      ) : null}
+
+      <Card
+        title="Daily stock report"
+        actions={<StatusChip value={enabled ? 'enabled' : 'off'} tone={enabled ? 'ok' : 'muted'} />}
+      >
+        <p className="muted-text">
+          One email a day, <strong>every day</strong>, listing in-stock models grouped by brand and category. It goes
+          to dealers, so quantities above the threshold are shown as “Available” and only low stock shows a real
+          number. Everyone is Bcc’d — recipients never see each other.
+          {cronJob ? ` Scheduled as ${cronJob.expr}.` : ''}
+        </p>
+        <form
+          className="stack-form wide"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save.mutate({
+              stock_report_enabled: enabled,
+              stock_report_time: String(value('stock_report_time') || '08:30'),
+              stock_report_threshold: Number(value('stock_report_threshold')) || 25,
+              stock_report_sync_first: Boolean(value('stock_report_sync_first')),
+              stock_report_recipients: recipients,
+              stock_report_excluded_brands: excludedBrands,
+              stock_report_excluded_categories: excludedCategories,
+            });
+          }}
+        >
+          <div className="settings-grid">
+            <label className="checkbox-field">
+              <input type="checkbox" checked={enabled} onChange={(e) => set('stock_report_enabled', e.target.checked)} />
+              Send the report automatically
+            </label>
+            <label>
+              Send time
+              <input
+                type="time"
+                value={String(value('stock_report_time') || '08:30')}
+                onChange={(e) => set('stock_report_time', e.target.value)}
+              />
+              <span className="hint">
+                Every day. If the server is switched on after this time, the report goes out at boot instead.
+              </span>
+            </label>
+            <label>
+              Hide quantities above
+              <input
+                type="number"
+                min="1"
+                max="10000"
+                step="1"
+                value={String(value('stock_report_threshold') ?? 25)}
+                onChange={(e) => set('stock_report_threshold', e.target.value)}
+              />
+              <span className="hint">
+                More than this shows “Available”; this number or fewer shows the exact count.
+              </span>
+            </label>
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={Boolean(value('stock_report_sync_first'))}
+                onChange={(e) => set('stock_report_sync_first', e.target.checked)}
+              />
+              Refresh items from Zoho first
+            </label>
+          </div>
+
+          <div className="recipients-block">
+            <h3>Recipients ({recipients.length})</h3>
+            <div className="chip-row">
+              {recipients.length ? (
+                recipients.map((r) => (
+                  <span key={r} className="chip info recipient-chip">
+                    {r}
+                    <button
+                      type="button"
+                      className="chip-x"
+                      title="Remove"
+                      onClick={() => set('stock_report_recipients', recipients.filter((x) => x !== r))}
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))
+              ) : (
+                <span className="muted-text">No recipients yet.</span>
+              )}
+            </div>
+            <div className="inline-form">
+              <input
+                type="text"
+                className="recipient-input"
+                placeholder="dealer@example.in"
+                value={recipientInput}
+                onChange={(e) => setRecipientInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    addRecipient();
+                  }
+                }}
+              />
+              <button type="button" className="btn ghost small" onClick={addRecipient}>
+                Add
+              </button>
+            </div>
+          </div>
+
+          <div className="exclude-grid">
+            <div>
+              <h3>Exclude brands</h3>
+              <div className="check-list">
+                {brands.map((b) => (
+                  <label key={b.id} className="check-row">
+                    <input
+                      type="checkbox"
+                      checked={excludedBrands.includes(Number(b.id))}
+                      onChange={() => toggle('stock_report_excluded_brands', Number(b.id), excludedBrands)}
+                    />
+                    {b.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div>
+              <h3>Exclude categories</h3>
+              <div className="check-list">
+                {categories.length ? (
+                  categories.map((c) => (
+                    <label key={c.name} className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={excludedCategories.includes(c.name)}
+                        onChange={() => toggle('stock_report_excluded_categories', c.name, excludedCategories)}
+                      />
+                      {c.name} <span className="muted-text">({num(c.items)})</span>
+                    </label>
+                  ))
+                ) : (
+                  <span className="muted-text">No stock loaded yet.</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="form-row">
+            <button type="submit" className="btn" disabled={save.isPending || !draft}>
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
+            {save.isSuccess && !draft ? <span className="form-ok">Saved.</span> : null}
+            <button type="button" className="btn ghost" onClick={() => runPreview.mutate()} disabled={runPreview.isPending}>
+              {runPreview.isPending ? 'Composing…' : 'Preview'}
+            </button>
+            <button type="button" className="btn ghost" onClick={() => setConfirming(true)} disabled={sendNow.isPending}>
+              {sendNow.isPending ? 'Sending…' : 'Send now'}
+            </button>
+          </div>
+        </form>
+
+        {confirming ? (
+          <div className="confirm-block">
+            <p className="muted-text">
+              This emails <strong>{recipients.length} recipient(s)</strong> immediately using the <em>saved</em>{' '}
+              settings — save first if you have unsaved changes. If today's report already went out it will be
+              skipped; tick force to send it anyway.
+            </p>
+            <div className="form-row">
+              <button type="button" className="btn" onClick={() => sendNow.mutate(false)} disabled={sendNow.isPending}>
+                Send
+              </button>
+              <button type="button" className="btn ghost" onClick={() => sendNow.mutate(true)} disabled={sendNow.isPending}>
+                Force resend
+              </button>
+              <button type="button" className="btn ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {sendNow.isSuccess ? (
+          <div className={`state-msg ${sendNow.data.sent ? '' : 'error'}`}>
+            {sendNow.data.sent
+              ? `Sent to ${sendNow.data.recipients} recipient(s) — ${num(sendNow.data.counts?.models || 0)} model(s).`
+              : `Not sent: ${sendNow.data.reason || sendNow.data.error}`}
+          </div>
+        ) : null}
+      </Card>
+
+      {preview ? (
+        <Card
+          title={`Preview · ${preview.runDate}`}
+          actions={
+            <button type="button" className="btn ghost small" onClick={() => setPreview(null)}>
+              Close
+            </button>
+          }
+        >
+          <div className="stat-strip">
+            <span>
+              Models <strong>{num(preview.counts.models)}</strong>
+            </span>
+            <span>
+              Items <strong>{num(preview.counts.items)}</strong>
+            </span>
+            <span>
+              Brands <strong>{num(preview.counts.brands)}</strong>
+            </span>
+            <span>
+              Hidden above <strong>{num(preview.threshold)}</strong>
+            </span>
+            <span>
+              Stock synced <strong>{preview.sync.lastRunAt ? timeAgo(preview.sync.lastRunAt) : 'never'}</strong>
+            </span>
+          </div>
+          <p className="muted-text">Subject: {preview.subject}</p>
+          <iframe className="mail-preview" title="Stock report preview" srcDoc={preview.html} />
+        </Card>
+      ) : null}
+    </>
   );
 }
 

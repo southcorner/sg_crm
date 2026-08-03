@@ -61,6 +61,14 @@ const EDITABLE = {
   smtp_user: z.string().trim().max(255),
   smtp_pass: z.string().max(255),
   smtp_from: z.string().trim().max(255),
+  // daily dealer stock report
+  stock_report_enabled: z.coerce.boolean(),
+  stock_report_time: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'send time must look like HH:MM'),
+  stock_report_recipients: z.array(z.string().trim().email('not a valid email address')).max(200),
+  stock_report_threshold: z.coerce.number().int().min(1).max(10000),
+  stock_report_excluded_brands: z.array(z.coerce.number().int().min(0)).max(500),
+  stock_report_excluded_categories: z.array(z.string().trim().max(120)).max(500),
+  stock_report_sync_first: z.coerce.boolean(),
 };
 
 /** Written but never returned. */
@@ -121,6 +129,10 @@ router.put(
     if (updated.includes('digest_send_time')) {
       const rescheduled = cronJobs.rescheduleDigest();
       if (rescheduled) logger.info(rescheduled, 'digest schedule updated');
+    }
+    if (updated.includes('stock_report_time') || updated.includes('stock_report_enabled')) {
+      const rescheduled = cronJobs.rescheduleStockReport();
+      if (rescheduled) logger.info(rescheduled, 'stock report schedule updated');
     }
 
     return res.json({ ...payload(), updated });

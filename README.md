@@ -43,12 +43,13 @@ C:\sg_crm\
 │   │   ├── db\               connection.js, migrate.js, migrations\*.sql
 │   │   ├── zoho\             auth.js (OAuth), client.js (rate limit + budget), sync.js
 │   │   ├── services\         attribution, brands, performance, dormant, cheques,
-│   │   │                     focus, adminUser, reminders\{engine,email,whatsapp}
+│   │   │                     focus, adminUser, stock, stock-report,
+│   │   │                     reminders\{engine,email,whatsapp}
 │   │   ├── routes\           one router per feature, mounted in routes\index.js
 │   │   ├── middleware\auth.js session guard
-│   │   └── jobs\cron.js      the digest + sync schedules
+│   │   └── jobs\cron.js      digest, stock report + sync schedules
 │   ├── scripts\backup-db.js  VACUUM INTO worker (called by backup-db.ps1)
-│   └── test\                 node:test suites (phase2..phase6, zoho)
+│   └── test\                 node:test suites (phase2..phase6, zoho, stock-report)
 ├── client\src\               React 18 + Vite: pages\, components\, api.js
 ├── client\dist\              build output, served in production (gitignored)
 ├── dist-installer\           sg_crm-setup.exe (gitignored)
@@ -324,7 +325,34 @@ username, password (write-only — it is never sent back to the browser) and the
 From address. Save, then use **Send a test email**. Finally go to **Reminders →
 Run now** with *dry run* ticked to see exactly what each rep would get today.
 
-### 5.8 WhatsApp (optional, and read this honestly)
+### 5.8 The dealer stock report
+
+**Settings → Stock Report** — a different audience from everything else in the
+CRM: this one goes to **dealers**, so quantities are masked.
+
+- **Send the report automatically** — off until you switch it on. It is never
+  enabled by default, because it mails people outside the company.
+- **Send time** — default 08:30, **every day** (dealers order on Sundays too).
+  If the server is switched on *after* this time, the report goes out at boot
+  rather than skipping the day. It can only go out once per day either way.
+- **Hide quantities above** — default 25. More than this shows “Available”;
+  this number or fewer shows the exact count, which is the number a dealer
+  actually needs. The rule applies to model totals and colour rows alike.
+- **Refresh items from Zoho first** — pulls the `items` entity before composing.
+  If Zoho is down or disconnected the report still goes out on stored data and
+  says so in its footer.
+- **Recipients** — everyone is **Bcc**'d, so dealers never see each other.
+- **Exclude brands / categories** — tick anything the dealers should not see.
+  `Unbranded` collects items no brand rule has claimed; most setups exclude it.
+
+Models are grouped automatically: colourways of one racket merge into a single
+row with per-colour sub-rows, while genuinely different sub-models (a 4U and a
+5U, or “FINAPI 232” and “FINAPI 232 XTRA POWER”) stay apart. Use **Preview** to
+see the exact email before switching it on, and **Send now** for a one-off (it
+still respects the once-a-day guard unless you pick *Force resend*). Every send
+is logged on the **Reminders** page under rule type *Stock report*.
+
+### 5.9 WhatsApp (optional, and read this honestly)
 
 **Settings → WhatsApp → Enable**, wait ~10–30 s for the headless browser, then on
 the phone: **WhatsApp → Settings → Linked devices → Link a device** and scan the

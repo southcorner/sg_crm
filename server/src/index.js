@@ -173,7 +173,17 @@ function start() {
     );
     // schedulers live in this process; nothing else may start them
     const cronStatus = cronJobs.start();
-    logger.info({ cron: cronStatus.started, sendTime: cronStatus.sendTime }, 'cron boot');
+    logger.info(
+      { cron: cronStatus.started, sendTime: cronStatus.sendTime, stockTime: cronStatus.stockTime },
+      'cron boot'
+    );
+
+    // The admin switches this machine on in the morning. If that happens after
+    // the stock report's slot, send it now rather than skipping the day.
+    cronJobs
+      .stockReportCatchUp({})
+      .then((r) => logger.info({ ran: Boolean(r.ran), reason: r.reason }, 'stock report catch-up'))
+      .catch((err) => logger.error({ err: err.message }, 'stock report catch-up failed'));
 
     // Lazy by design: no puppeteer, no Chromium, no session unless the admin
     // has switched the channel on in Settings → WhatsApp.

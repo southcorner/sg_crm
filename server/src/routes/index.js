@@ -22,6 +22,7 @@ const dormantRoutes = require('./dormant');
 const chequeRoutes = require('./cheques');
 const reminderRoutes = require('./reminders');
 const whatsappRoutes = require('./whatsapp');
+const stockReportRoutes = require('./stock-report');
 const settingsRoutes = require('./settings');
 const config = require('../config');
 
@@ -58,6 +59,9 @@ router.use('/reminders', reminderRoutes);
 
 // phase 5 — WhatsApp session (whatsapp-web.js)
 router.use('/whatsapp', whatsappRoutes);
+
+// daily dealer stock report (masked quantities)
+router.use('/stock-report', stockReportRoutes);
 
 router.use('/settings', settingsRoutes);
 

@@ -25,7 +25,7 @@ const cronJobs = require('../jobs/cron');
 const router = express.Router();
 
 const DATE = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date must look like YYYY-MM-DD');
-const RULE_TYPES = ['digest', 'overdue', 'cheque', 'dormant', 'focus'];
+const RULE_TYPES = ['digest', 'overdue', 'cheque', 'dormant', 'focus', 'stock_report'];
 
 const logSchema = z.object({
   date: DATE.optional(),
