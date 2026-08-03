@@ -257,15 +257,18 @@ function detailText(row) {
   if (row.rule_type === 'dormant') return `last invoice ${d.last_invoice_date || '—'} (${d.months_dormant} mo)`;
   if (row.rule_type === 'focus') return d.note || '—';
   if (row.rule_type === 'stock_report') {
-    if (d.reason) return d.reason;
+    if (d.reason) return `${d.profile ? `${d.profile}: ` : ''}${d.reason}`;
     const c = d.counts || {};
-    return [
-      d.recipients ? `${d.recipients} recipient(s)` : null,
-      c.models ? `${c.models} model(s)` : null,
-      c.brands ? `${c.brands} brand(s)` : null,
-    ]
-      .filter(Boolean)
-      .join(' · ') || '—';
+    return (
+      [
+        d.profile || null,
+        d.recipients ? `${d.recipients} recipient(s)` : null,
+        c.models ? `${c.models} model(s)` : null,
+        d.attachment || null,
+      ]
+        .filter(Boolean)
+        .join(' · ') || '—'
+    );
   }
   return '—';
 }

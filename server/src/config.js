@@ -130,14 +130,12 @@ const SETTING_DEFAULTS = {
   smtp_user: '',
   smtp_from: '',
   // Daily dealer stock report (services/stock-report.js). Off until an admin
-  // adds recipients — it goes to customers, not staff, so it never turns
-  // itself on. Quantities above the threshold are masked to "Available".
+  // adds a profile with recipients — it goes to customers, not staff, so it
+  // never turns itself on. Recipients, exclusions and the masking threshold
+  // live per profile in `stock_report_profiles` (migration 003); only the
+  // master switch, the schedule and the pre-send refresh are global.
   stock_report_enabled: false,
   stock_report_time: '08:30',
-  stock_report_recipients: [],
-  stock_report_threshold: 25,
-  stock_report_excluded_brands: [],
-  stock_report_excluded_categories: [],
   stock_report_sync_first: true,
 };
 

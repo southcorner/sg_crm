@@ -165,11 +165,13 @@ async function sendTestEmail(to) {
  * is what every mailer does for a bulk send and keeps the message RFC-valid
  * (a message with no To at all trips some spam filters).
  */
-async function sendBcc(recipients, subject, html, text) {
+async function sendBcc(recipients, subject, html, text, attachments = []) {
   const list = (Array.isArray(recipients) ? recipients : [recipients])
     .map((r) => String(r || '').trim())
     .filter(Boolean);
   if (!list.length) throw httpError(400, 'no recipient addresses');
+
+  const files = (Array.isArray(attachments) ? attachments : [attachments]).filter(Boolean);
 
   const transport = getTransport();
   const from = fromAddress();
@@ -180,9 +182,13 @@ async function sendBcc(recipients, subject, html, text) {
     subject,
     ...(text ? { text } : {}),
     ...(html ? { html } : {}),
+    ...(files.length ? { attachments: files } : {}),
   });
 
-  logger.debug({ bcc: list.length, subject, messageId: info.messageId }, 'bulk email sent');
+  logger.debug(
+    { bcc: list.length, subject, attachments: files.length, messageId: info.messageId },
+    'bulk email sent'
+  );
   return info;
 }
 

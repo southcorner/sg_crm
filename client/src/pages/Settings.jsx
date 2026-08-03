@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import api from '../api.js';
-import { fmtDateTime, timeAgo, num, titleCase } from '../format.js';
+import { fmtDateTime, timeAgo, num, titleCase, qs } from '../format.js';
 import { Card, Loading, ErrorBox, StatusChip, ProgressBar, Tabs, Banner } from '../components/ui.jsx';
 
 const ENTITY_LABELS = {
@@ -50,272 +50,273 @@ export default function Settings() {
 /**
  * The daily dealer stock report.
  *
- * This one goes to CUSTOMERS, so the tab leads with the two things that matter
- * to whoever switches it on: who receives it, and the threshold above which a
- * quantity is hidden behind "Available". The preview is the real composer, so
- * what is rendered here is byte-for-byte what the dealers get.
+ * This one goes to CUSTOMERS, and different customers should see different
+ * catalogues — so the tab is built around PROFILES: each is a recipient list
+ * with its own exclusions and its own masking threshold, and each gets its own
+ * mail with its own tailored offline browser attached.
+ *
+ * Global settings above (master switch, send time, pre-send refresh), the
+ * profile list in the middle, and a build-your-own download at the bottom for
+ * the one-off "send me a Katana-only file" request.
  */
 function StockReportTab() {
   const queryClient = useQueryClient();
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings') });
-  const optionsQuery = useQuery({ queryKey: ['stock-report-options'], queryFn: () => api.get('/stock-report/options') });
+  const profilesQuery = useQuery({ queryKey: ['stock-profiles'], queryFn: () => api.get('/stock-report/profiles') });
 
-  const [draft, setDraft] = useState(null);
-  const [recipientInput, setRecipientInput] = useState('');
+  const [globalDraft, setGlobalDraft] = useState(null);
+  const [editing, setEditing] = useState(null); // profile id, or 'new'
   const [preview, setPreview] = useState(null);
-  const [confirming, setConfirming] = useState(false);
+  const [confirming, setConfirming] = useState(null); // profile id or 'all'
 
-  const save = useMutation({
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ['stock-profiles'] });
+    queryClient.invalidateQueries({ queryKey: ['reminders-log'] });
+  };
+
+  const saveGlobal = useMutation({
     mutationFn: (body) => api.put('/settings', body),
     onSuccess: (res) => {
-      setDraft(null);
+      setGlobalDraft(null);
       queryClient.setQueryData(['settings'], res);
       queryClient.invalidateQueries({ queryKey: ['settings'] });
-      queryClient.invalidateQueries({ queryKey: ['stock-report-options'] });
     },
   });
 
+  const createProfile = useMutation({
+    mutationFn: (body) => api.post('/stock-report/profiles', body),
+    onSuccess: () => {
+      setEditing(null);
+      refresh();
+    },
+  });
+  const updateProfile = useMutation({
+    mutationFn: ({ id, patch }) => api.put(`/stock-report/profiles/${id}`, patch),
+    onSuccess: () => {
+      setEditing(null);
+      refresh();
+    },
+  });
+  const removeProfile = useMutation({
+    mutationFn: (id) => api.del(`/stock-report/profiles/${id}`),
+    onSuccess: refresh,
+  });
   const runPreview = useMutation({
-    mutationFn: () => api.get(`/stock-report/preview${previewQuery()}`),
+    mutationFn: (id) => api.get(`/stock-report/profiles/${id}/preview`),
     onSuccess: (res) => setPreview(res),
   });
-
   const sendNow = useMutation({
-    mutationFn: (force) => api.post('/stock-report/send', { force: Boolean(force) }),
+    mutationFn: ({ id, force }) =>
+      api.post('/stock-report/send', { ...(id ? { profile_id: id } : {}), ...(force ? { force: true } : {}) }),
     onSuccess: () => {
-      setConfirming(false);
-      queryClient.invalidateQueries({ queryKey: ['reminders-log'] });
-      queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setConfirming(null);
+      refresh();
     },
   });
 
-  if (settingsQuery.isLoading) return <Loading />;
+  if (settingsQuery.isLoading || profilesQuery.isLoading) return <Loading />;
 
   const settings = settingsQuery.data?.settings || {};
   const smtp = settingsQuery.data?.smtp || {};
   const cron = settingsQuery.data?.cron || {};
-  const brands = optionsQuery.data?.brands || [];
-  const categories = optionsQuery.data?.categories || [];
+  const profiles = profilesQuery.data?.profiles || [];
+  const brands = profilesQuery.data?.brands || [];
+  const categories = profilesQuery.data?.categories || [];
+  const lastRuns = profilesQuery.data?.lastRuns || [];
+  const sync = profilesQuery.data?.sync || {};
 
-  const value = (key) => (draft && draft[key] !== undefined ? draft[key] : settings[key]);
-  const set = (key, v) => setDraft((d) => ({ ...(d || {}), [key]: v }));
-  const asList = (key) => {
-    const v = value(key);
-    return Array.isArray(v) ? v : [];
-  };
-  const recipients = asList('stock_report_recipients');
-  const excludedBrands = asList('stock_report_excluded_brands').map(Number);
-  const excludedCategories = asList('stock_report_excluded_categories').map(String);
+  const gValue = (key) => (globalDraft && globalDraft[key] !== undefined ? globalDraft[key] : settings[key]);
+  const gSet = (key, v) => setGlobalDraft((d) => ({ ...(d || {}), [key]: v }));
 
-  function previewQuery() {
-    const params = new URLSearchParams();
-    params.set('threshold', String(Number(value('stock_report_threshold')) || 25));
-    for (const id of excludedBrands) params.append('excluded_brands', String(id));
-    for (const c of excludedCategories) params.append('excluded_categories', c);
-    return `?${params.toString()}`;
-  }
-
-  const toggle = (key, item, list) =>
-    set(key, list.includes(item) ? list.filter((x) => x !== item) : [...list, item]);
-
-  function addRecipient() {
-    const value_ = recipientInput.trim();
-    if (!value_) return;
-    // one paste of "a@x.in, b@x.in" should not become one bogus address
-    const added = value_.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
-    set('stock_report_recipients', [...new Set([...recipients, ...added])]);
-    setRecipientInput('');
-  }
-
-  const enabled = Boolean(value('stock_report_enabled'));
+  const enabled = Boolean(gValue('stock_report_enabled'));
   const cronJob = (cron.jobs || []).find((j) => j.name === 'stock_report');
+  const sendable = profiles.filter((p) => p.enabled && p.recipients.length);
+  const lastFor = (id) => lastRuns.find((r) => r.profileId === id) || null;
 
   return (
     <>
-      <ErrorBox error={settingsQuery.error || save.error || runPreview.error || sendNow.error} />
+      <ErrorBox
+        error={
+          settingsQuery.error ||
+          profilesQuery.error ||
+          saveGlobal.error ||
+          createProfile.error ||
+          updateProfile.error ||
+          removeProfile.error ||
+          runPreview.error ||
+          sendNow.error
+        }
+      />
 
       {!smtp.configured ? (
         <Banner tone="warn">
-          SMTP is not configured — the report cannot be delivered. Set the mail server under the{' '}
-          <strong>Reminders</strong> tab.
+          SMTP is not configured — nothing can be delivered. Set the mail server under the <strong>Reminders</strong>{' '}
+          tab.
         </Banner>
       ) : null}
-      {enabled && !recipients.length ? (
-        <Banner tone="warn">The report is switched on but has no recipients, so nothing will be sent.</Banner>
+      {enabled && !sendable.length ? (
+        <Banner tone="warn">
+          The report is switched on, but no enabled profile has recipients — nothing will be sent.
+        </Banner>
       ) : null}
 
       <Card
-        title="Daily stock report"
+        title="Schedule"
         actions={<StatusChip value={enabled ? 'enabled' : 'off'} tone={enabled ? 'ok' : 'muted'} />}
       >
         <p className="muted-text">
-          One email a day, <strong>every day</strong>, listing in-stock models grouped by brand and category. It goes
-          to dealers, so quantities above the threshold are shown as “Available” and only low stock shows a real
-          number. Everyone is Bcc’d — recipients never see each other.
+          One email per profile per day, <strong>every day</strong>. Each carries a searchable offline HTML file of
+          that profile's stock; quantities above its threshold read “Available”. Recipients are Bcc'd and never see
+          each other.
           {cronJob ? ` Scheduled as ${cronJob.expr}.` : ''}
         </p>
         <form
           className="stack-form wide"
           onSubmit={(e) => {
             e.preventDefault();
-            save.mutate({
+            saveGlobal.mutate({
               stock_report_enabled: enabled,
-              stock_report_time: String(value('stock_report_time') || '08:30'),
-              stock_report_threshold: Number(value('stock_report_threshold')) || 25,
-              stock_report_sync_first: Boolean(value('stock_report_sync_first')),
-              stock_report_recipients: recipients,
-              stock_report_excluded_brands: excludedBrands,
-              stock_report_excluded_categories: excludedCategories,
+              stock_report_time: String(gValue('stock_report_time') || '08:30'),
+              stock_report_sync_first: Boolean(gValue('stock_report_sync_first')),
             });
           }}
         >
           <div className="settings-grid">
             <label className="checkbox-field">
-              <input type="checkbox" checked={enabled} onChange={(e) => set('stock_report_enabled', e.target.checked)} />
-              Send the report automatically
+              <input
+                type="checkbox"
+                checked={enabled}
+                onChange={(e) => gSet('stock_report_enabled', e.target.checked)}
+              />
+              Send automatically
             </label>
             <label>
               Send time
               <input
                 type="time"
-                value={String(value('stock_report_time') || '08:30')}
-                onChange={(e) => set('stock_report_time', e.target.value)}
+                value={String(gValue('stock_report_time') || '08:30')}
+                onChange={(e) => gSet('stock_report_time', e.target.value)}
               />
               <span className="hint">
-                Every day. If the server is switched on after this time, the report goes out at boot instead.
-              </span>
-            </label>
-            <label>
-              Hide quantities above
-              <input
-                type="number"
-                min="1"
-                max="10000"
-                step="1"
-                value={String(value('stock_report_threshold') ?? 25)}
-                onChange={(e) => set('stock_report_threshold', e.target.value)}
-              />
-              <span className="hint">
-                More than this shows “Available”; this number or fewer shows the exact count.
+                Every day. If the server is switched on after this time, the day's mails go out at boot instead.
               </span>
             </label>
             <label className="checkbox-field">
               <input
                 type="checkbox"
-                checked={Boolean(value('stock_report_sync_first'))}
-                onChange={(e) => set('stock_report_sync_first', e.target.checked)}
+                checked={Boolean(gValue('stock_report_sync_first'))}
+                onChange={(e) => gSet('stock_report_sync_first', e.target.checked)}
               />
               Refresh items from Zoho first
             </label>
           </div>
-
-          <div className="recipients-block">
-            <h3>Recipients ({recipients.length})</h3>
-            <div className="chip-row">
-              {recipients.length ? (
-                recipients.map((r) => (
-                  <span key={r} className="chip info recipient-chip">
-                    {r}
-                    <button
-                      type="button"
-                      className="chip-x"
-                      title="Remove"
-                      onClick={() => set('stock_report_recipients', recipients.filter((x) => x !== r))}
-                    >
-                      ×
-                    </button>
-                  </span>
-                ))
-              ) : (
-                <span className="muted-text">No recipients yet.</span>
-              )}
-            </div>
-            <div className="inline-form">
-              <input
-                type="text"
-                className="recipient-input"
-                placeholder="dealer@example.in"
-                value={recipientInput}
-                onChange={(e) => setRecipientInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    addRecipient();
-                  }
-                }}
-              />
-              <button type="button" className="btn ghost small" onClick={addRecipient}>
-                Add
-              </button>
-            </div>
-          </div>
-
-          <div className="exclude-grid">
-            <div>
-              <h3>Exclude brands</h3>
-              <div className="check-list">
-                {brands.map((b) => (
-                  <label key={b.id} className="check-row">
-                    <input
-                      type="checkbox"
-                      checked={excludedBrands.includes(Number(b.id))}
-                      onChange={() => toggle('stock_report_excluded_brands', Number(b.id), excludedBrands)}
-                    />
-                    {b.name}
-                  </label>
-                ))}
-              </div>
-            </div>
-            <div>
-              <h3>Exclude categories</h3>
-              <div className="check-list">
-                {categories.length ? (
-                  categories.map((c) => (
-                    <label key={c.name} className="check-row">
-                      <input
-                        type="checkbox"
-                        checked={excludedCategories.includes(c.name)}
-                        onChange={() => toggle('stock_report_excluded_categories', c.name, excludedCategories)}
-                      />
-                      {c.name} <span className="muted-text">({num(c.items)})</span>
-                    </label>
-                  ))
-                ) : (
-                  <span className="muted-text">No stock loaded yet.</span>
-                )}
-              </div>
-            </div>
-          </div>
-
           <div className="form-row">
-            <button type="submit" className="btn" disabled={save.isPending || !draft}>
-              {save.isPending ? 'Saving…' : 'Save'}
+            <button type="submit" className="btn" disabled={saveGlobal.isPending || !globalDraft}>
+              {saveGlobal.isPending ? 'Saving…' : 'Save'}
             </button>
-            {save.isSuccess && !draft ? <span className="form-ok">Saved.</span> : null}
-            <button type="button" className="btn ghost" onClick={() => runPreview.mutate()} disabled={runPreview.isPending}>
-              {runPreview.isPending ? 'Composing…' : 'Preview'}
-            </button>
-            <button type="button" className="btn ghost" onClick={() => setConfirming(true)} disabled={sendNow.isPending}>
-              {sendNow.isPending ? 'Sending…' : 'Send now'}
-            </button>
+            {saveGlobal.isSuccess && !globalDraft ? <span className="form-ok">Saved.</span> : null}
+            <span className="muted-text">
+              Stock last synced {sync.lastRunAt ? timeAgo(sync.lastRunAt) : 'never'}.
+            </span>
           </div>
         </form>
+      </Card>
+
+      <Card
+        title={`Recipient profiles (${profiles.length})`}
+        actions={
+          <div className="panel-actions">
+            <button
+              type="button"
+              className="btn ghost small"
+              onClick={() => setConfirming('all')}
+              disabled={sendNow.isPending || !sendable.length}
+            >
+              Send all now
+            </button>
+            <button type="button" className="btn small" onClick={() => setEditing(editing === 'new' ? null : 'new')}>
+              {editing === 'new' ? 'Cancel' : 'Add profile'}
+            </button>
+          </div>
+        }
+      >
+        <p className="muted-text">
+          Each profile is a recipient list with its own exclusions and threshold. A new profile never sends
+          immediately — it joins the next scheduled send.
+        </p>
+
+        {editing === 'new' ? (
+          <ProfileEditor
+            brands={brands}
+            categories={categories}
+            defaultThreshold={profilesQuery.data?.defaultThreshold ?? 25}
+            pending={createProfile.isPending}
+            onCancel={() => setEditing(null)}
+            onSubmit={(body) => createProfile.mutate(body)}
+          />
+        ) : null}
+
+        {profiles.length ? (
+          <div className="profile-list">
+            {profiles.map((p) =>
+              editing === p.id ? (
+                <ProfileEditor
+                  key={p.id}
+                  profile={p}
+                  brands={brands}
+                  categories={categories}
+                  defaultThreshold={profilesQuery.data?.defaultThreshold ?? 25}
+                  pending={updateProfile.isPending}
+                  onCancel={() => setEditing(null)}
+                  onSubmit={(patch) => updateProfile.mutate({ id: p.id, patch })}
+                />
+              ) : (
+                <ProfileRow
+                  key={p.id}
+                  profile={p}
+                  brands={brands}
+                  lastRun={lastFor(p.id)}
+                  busy={sendNow.isPending || removeProfile.isPending}
+                  onEdit={() => setEditing(p.id)}
+                  onPreview={() => runPreview.mutate(p.id)}
+                  onSend={() => setConfirming(p.id)}
+                  onDelete={() => removeProfile.mutate(p.id)}
+                />
+              )
+            )}
+          </div>
+        ) : editing !== 'new' ? (
+          <p className="muted-text">
+            No profiles yet. Add one to start sending — until then the report has nowhere to go.
+          </p>
+        ) : null}
 
         {confirming ? (
           <div className="confirm-block">
             <p className="muted-text">
-              This emails <strong>{recipients.length} recipient(s)</strong> immediately using the <em>saved</em>{' '}
-              settings — save first if you have unsaved changes. If today's report already went out it will be
-              skipped; tick force to send it anyway.
+              {confirming === 'all'
+                ? `This emails every enabled profile with recipients (${sendable.length}) right now, using the saved settings.`
+                : `This emails “${profiles.find((p) => p.id === confirming)?.name}” right now, using the saved settings.`}{' '}
+              Anything already sent today is skipped unless you force it.
             </p>
             <div className="form-row">
-              <button type="button" className="btn" onClick={() => sendNow.mutate(false)} disabled={sendNow.isPending}>
+              <button
+                type="button"
+                className="btn"
+                disabled={sendNow.isPending}
+                onClick={() => sendNow.mutate({ id: confirming === 'all' ? null : confirming, force: false })}
+              >
                 Send
               </button>
-              <button type="button" className="btn ghost" onClick={() => sendNow.mutate(true)} disabled={sendNow.isPending}>
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={sendNow.isPending}
+                onClick={() => sendNow.mutate({ id: confirming === 'all' ? null : confirming, force: true })}
+              >
                 Force resend
               </button>
-              <button type="button" className="btn ghost" onClick={() => setConfirming(false)}>
+              <button type="button" className="btn ghost" onClick={() => setConfirming(null)}>
                 Cancel
               </button>
             </div>
@@ -325,43 +326,373 @@ function StockReportTab() {
         {sendNow.isSuccess ? (
           <div className={`state-msg ${sendNow.data.sent ? '' : 'error'}`}>
             {sendNow.data.sent
-              ? `Sent to ${sendNow.data.recipients} recipient(s) — ${num(sendNow.data.counts?.models || 0)} model(s).`
-              : `Not sent: ${sendNow.data.reason || sendNow.data.error}`}
+              ? `Sent ${sendNow.data.sent} mail(s)${sendNow.data.skipped ? `, ${sendNow.data.skipped} skipped` : ''}${
+                  sendNow.data.failed ? `, ${sendNow.data.failed} failed` : ''
+                }.`
+              : `Nothing sent: ${sendNow.data.reason || (sendNow.data.results || []).map((r) => r.reason || r.error).join('; ')}`}
           </div>
         ) : null}
       </Card>
 
-      {preview ? (
-        <Card
-          title={`Preview · ${preview.runDate}`}
-          actions={
-            <button type="button" className="btn ghost small" onClick={() => setPreview(null)}>
-              Close
-            </button>
-          }
-        >
-          <div className="stat-strip">
-            <span>
-              Models <strong>{num(preview.counts.models)}</strong>
-            </span>
-            <span>
-              Items <strong>{num(preview.counts.items)}</strong>
-            </span>
-            <span>
-              Brands <strong>{num(preview.counts.brands)}</strong>
-            </span>
-            <span>
-              Hidden above <strong>{num(preview.threshold)}</strong>
-            </span>
-            <span>
-              Stock synced <strong>{preview.sync.lastRunAt ? timeAgo(preview.sync.lastRunAt) : 'never'}</strong>
-            </span>
-          </div>
-          <p className="muted-text">Subject: {preview.subject}</p>
-          <iframe className="mail-preview" title="Stock report preview" srcDoc={preview.html} />
-        </Card>
-      ) : null}
+      <CustomFileCard brands={brands} categories={categories} defaultThreshold={profilesQuery.data?.defaultThreshold ?? 25} />
+
+      {preview ? <StockPreview preview={preview} onClose={() => setPreview(null)} /> : null}
     </>
+  );
+}
+
+const LAST_RUN_LABEL = {
+  sent: 'sent',
+  failed: 'FAILED',
+  pending: 'in flight since',
+  skipped_dedupe: 'already sent,',
+  skipped: 'skipped',
+};
+
+/** One profile, collapsed: who it goes to, what it hides, when it last ran. */
+function ProfileRow({ profile, brands, lastRun, busy, onEdit, onPreview, onSend, onDelete }) {
+  const brandName = (id) => brands.find((b) => Number(b.id) === Number(id))?.name || `#${id}`;
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  return (
+    <div className={`profile-row ${profile.enabled ? '' : 'off'}`}>
+      <div className="profile-head">
+        <span className="profile-name">{profile.name}</span>
+        <StatusChip value={profile.enabled ? 'on' : 'paused'} tone={profile.enabled ? 'ok' : 'muted'} />
+        <span className="profile-meta">
+          {profile.recipients.length} recipient(s) · hides above {profile.threshold}
+        </span>
+        <div className="spacer" />
+        {lastRun ? (
+          <span className="profile-meta" title={`${lastRun.status} · ${lastRun.created_at}`}>
+            {LAST_RUN_LABEL[lastRun.status] || titleCase(lastRun.status)} {timeAgo(lastRun.created_at)}
+          </span>
+        ) : (
+          <span className="profile-meta">never sent</span>
+        )}
+      </div>
+
+      <div className="profile-body">
+        <div className="chip-row">
+          {profile.recipients.length ? (
+            profile.recipients.map((r) => (
+              <span key={r} className="chip info">
+                {r}
+              </span>
+            ))
+          ) : (
+            <span className="muted-text">No recipients — this profile is never sent.</span>
+          )}
+        </div>
+        {profile.excludedBrands.length || profile.excludedCategories.length ? (
+          <div className="profile-excl">
+            Excludes:{' '}
+            {[...profile.excludedBrands.map(brandName), ...profile.excludedCategories].join(', ')}
+          </div>
+        ) : (
+          <div className="profile-excl">Includes everything in stock.</div>
+        )}
+      </div>
+
+      <div className="form-row">
+        <button type="button" className="btn ghost small" onClick={onEdit}>
+          Edit
+        </button>
+        <button type="button" className="btn ghost small" onClick={onPreview}>
+          Preview
+        </button>
+        <a className="btn ghost small" href={`/api/stock-report/profiles/${profile.id}/file`} download>
+          Download file
+        </a>
+        <button type="button" className="btn ghost small" onClick={onSend} disabled={busy || !profile.recipients.length}>
+          Send now
+        </button>
+        <div className="spacer" />
+        {confirmDelete ? (
+          <>
+            <span className="muted-text">Delete “{profile.name}”?</span>
+            <button type="button" className="btn danger small" disabled={busy} onClick={onDelete}>
+              Delete
+            </button>
+            <button type="button" className="btn ghost small" onClick={() => setConfirmDelete(false)}>
+              Keep
+            </button>
+          </>
+        ) : (
+          <button type="button" className="btn danger ghost small" onClick={() => setConfirmDelete(true)}>
+            Delete
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Add / edit form for a profile. */
+function ProfileEditor({ profile, brands, categories, defaultThreshold, pending, onCancel, onSubmit }) {
+  const [form, setForm] = useState(() => ({
+    name: profile?.name || '',
+    recipients: profile?.recipients || [],
+    excludedBrands: (profile?.excludedBrands || []).map(Number),
+    excludedCategories: profile?.excludedCategories || [],
+    threshold: String(profile?.threshold ?? defaultThreshold),
+    enabled: profile ? profile.enabled : true,
+  }));
+  const [recipientInput, setRecipientInput] = useState('');
+
+  const set = (key, v) => setForm((f) => ({ ...f, [key]: v }));
+  const toggle = (key, item) =>
+    set(key, form[key].includes(item) ? form[key].filter((x) => x !== item) : [...form[key], item]);
+
+  function addRecipient() {
+    const raw = recipientInput.trim();
+    if (!raw) return;
+    const added = raw.split(/[,;\s]+/).map((s) => s.trim()).filter(Boolean);
+    set('recipients', [...new Set([...form.recipients, ...added])]);
+    setRecipientInput('');
+  }
+
+  return (
+    <form
+      className="profile-editor"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit({
+          name: form.name.trim(),
+          recipients: form.recipients,
+          excludedBrands: form.excludedBrands,
+          excludedCategories: form.excludedCategories,
+          threshold: Number(form.threshold) || defaultThreshold,
+          enabled: form.enabled,
+        });
+      }}
+    >
+      <div className="settings-grid">
+        <label>
+          Profile name
+          <input
+            type="text"
+            required
+            placeholder="North dealers"
+            value={form.name}
+            onChange={(e) => set('name', e.target.value)}
+          />
+        </label>
+        <label>
+          Hide quantities above
+          <input
+            type="number"
+            min="1"
+            max="10000"
+            step="1"
+            value={form.threshold}
+            onChange={(e) => set('threshold', e.target.value)}
+          />
+          <span className="hint">More than this shows “Available”; this number or fewer shows the exact count.</span>
+        </label>
+        <label className="checkbox-field">
+          <input type="checkbox" checked={form.enabled} onChange={(e) => set('enabled', e.target.checked)} />
+          Include in the daily send
+        </label>
+      </div>
+
+      <div className="recipients-block">
+        <h3>Recipients ({form.recipients.length})</h3>
+        <div className="chip-row">
+          {form.recipients.length ? (
+            form.recipients.map((r) => (
+              <span key={r} className="chip info recipient-chip">
+                {r}
+                <button
+                  type="button"
+                  className="chip-x"
+                  title="Remove"
+                  onClick={() => set('recipients', form.recipients.filter((x) => x !== r))}
+                >
+                  ×
+                </button>
+              </span>
+            ))
+          ) : (
+            <span className="muted-text">No recipients yet.</span>
+          )}
+        </div>
+        <div className="inline-form">
+          <input
+            type="text"
+            className="recipient-input"
+            placeholder="dealer@example.in"
+            value={recipientInput}
+            onChange={(e) => setRecipientInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                addRecipient();
+              }
+            }}
+          />
+          <button type="button" className="btn ghost small" onClick={addRecipient}>
+            Add
+          </button>
+        </div>
+      </div>
+
+      <ExclusionPicker
+        brands={brands}
+        categories={categories}
+        excludedBrands={form.excludedBrands}
+        excludedCategories={form.excludedCategories}
+        onToggleBrand={(id) => toggle('excludedBrands', id)}
+        onToggleCategory={(name) => toggle('excludedCategories', name)}
+      />
+
+      <div className="form-row">
+        <button type="submit" className="btn" disabled={pending}>
+          {pending ? 'Saving…' : profile ? 'Save profile' : 'Create profile'}
+        </button>
+        <button type="button" className="btn ghost" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** The two exclusion checklists, shared by the profile editor and the custom download. */
+function ExclusionPicker({ brands, categories, excludedBrands, excludedCategories, onToggleBrand, onToggleCategory }) {
+  return (
+    <div className="exclude-grid">
+      <div>
+        <h3>Exclude brands</h3>
+        <div className="check-list">
+          {brands.map((b) => (
+            <label key={b.id} className="check-row">
+              <input
+                type="checkbox"
+                checked={excludedBrands.includes(Number(b.id))}
+                onChange={() => onToggleBrand(Number(b.id))}
+              />
+              {b.name}
+            </label>
+          ))}
+        </div>
+      </div>
+      <div>
+        <h3>Exclude categories</h3>
+        <div className="check-list">
+          {categories.length ? (
+            categories.map((c) => (
+              <label key={c.name} className="check-row">
+                <input
+                  type="checkbox"
+                  checked={excludedCategories.includes(c.name)}
+                  onChange={() => onToggleCategory(c.name)}
+                />
+                {c.name} <span className="muted-text">({num(c.items)})</span>
+              </label>
+            ))
+          ) : (
+            <span className="muted-text">No stock loaded yet.</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Build a one-off file without touching anybody's profile. */
+function CustomFileCard({ brands, categories, defaultThreshold }) {
+  const [excludedBrands, setExcludedBrands] = useState([]);
+  const [excludedCategories, setExcludedCategories] = useState([]);
+  const [threshold, setThreshold] = useState(String(defaultThreshold));
+
+  const href = `/api/stock-report/file${qs({
+    threshold: Number(threshold) || defaultThreshold,
+    brands: excludedBrands.join(','),
+    categories: excludedCategories.join(','),
+  })}`;
+
+  return (
+    <Card title="Custom file">
+      <p className="muted-text">
+        Build a one-off stock file — for a dealer who asked for “just the rackets”, say — without creating a profile.
+        Nothing is emailed; the file downloads to this machine.
+      </p>
+      <div className="settings-grid">
+        <label>
+          Hide quantities above
+          <input
+            type="number"
+            min="1"
+            max="10000"
+            step="1"
+            value={threshold}
+            onChange={(e) => setThreshold(e.target.value)}
+          />
+        </label>
+      </div>
+      <ExclusionPicker
+        brands={brands}
+        categories={categories}
+        excludedBrands={excludedBrands}
+        excludedCategories={excludedCategories}
+        onToggleBrand={(id) =>
+          setExcludedBrands((list) => (list.includes(id) ? list.filter((x) => x !== id) : [...list, id]))
+        }
+        onToggleCategory={(name) =>
+          setExcludedCategories((list) => (list.includes(name) ? list.filter((x) => x !== name) : [...list, name]))
+        }
+      />
+      <div className="form-row">
+        <a className="btn" href={href} download>
+          Download file
+        </a>
+      </div>
+    </Card>
+  );
+}
+
+/** The composed mail for a profile: summary body, plus what the attachment holds. */
+function StockPreview({ preview, onClose }) {
+  return (
+    <Card
+      title={`Preview · ${preview.profileName || 'profile'} · ${preview.runDate}`}
+      actions={
+        <button type="button" className="btn ghost small" onClick={onClose}>
+          Close
+        </button>
+      }
+    >
+      <div className="stat-strip">
+        <span>
+          Models <strong>{num(preview.counts.models)}</strong>
+        </span>
+        <span>
+          Items <strong>{num(preview.counts.items)}</strong>
+        </span>
+        <span>
+          Brands <strong>{num(preview.counts.brands)}</strong>
+        </span>
+        <span>
+          Hidden above <strong>{num(preview.threshold)}</strong>
+        </span>
+        <span>
+          Attachment <strong>{Math.round(preview.attachmentBytes / 1024)} KB</strong>
+        </span>
+      </div>
+      <p className="muted-text">
+        Subject: {preview.subject} · attaches <strong>{preview.file.filename}</strong> with{' '}
+        {num(preview.file.rows)} model(s), chips for {preview.file.brands.join(', ') || 'no brands'}.
+      </p>
+      <iframe className="mail-preview short" title="Stock report body preview" srcDoc={preview.html} />
+      <div className="form-row">
+        {preview.profileId ? (
+          <a className="btn ghost small" href={`/api/stock-report/profiles/${preview.profileId}/file`} download>
+            Download this profile's file
+          </a>
+        ) : null}
+      </div>
+    </Card>
   );
 }
 

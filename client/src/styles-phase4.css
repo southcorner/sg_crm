@@ -299,3 +299,74 @@
   border-radius: 8px;
   background: #f4f5f7;
 }
+
+/* ---- stock report: recipient profiles ---- */
+.profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.profile-row,
+.profile-editor {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 12px 14px;
+  background: var(--panel);
+}
+
+.profile-editor {
+  background: #f9fbfc;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.profile-row.off {
+  background: #fafbfc;
+}
+
+.profile-row.off .profile-name {
+  color: var(--muted);
+}
+
+.profile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.profile-name {
+  font-weight: 600;
+  font-size: 14.5px;
+}
+
+.profile-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.profile-body {
+  margin-bottom: 10px;
+}
+
+.profile-excl {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+
+.mail-preview.short {
+  height: 460px;
+}
+
+/* an <a> styled as a button needs the same box as a real one */
+a.btn {
+  display: inline-block;
+  text-decoration: none;
+  line-height: 1.35;
+}

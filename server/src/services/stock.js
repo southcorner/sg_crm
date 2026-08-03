@@ -202,6 +202,27 @@ function groupItems(items) {
 
 // ---- loading ---------------------------------------------------------------
 
+// ---- masking ---------------------------------------------------------------
+
+/**
+ * THE masking rule, shared by the email body and the HTML attachment so the two
+ * can never disagree. Above the threshold a dealer learns only that we have it;
+ * at or below it they see exactly how little is left, which is the number worth
+ * acting on. The boundary is inclusive — threshold 25 prints "25" for 25.
+ */
+const MASK_LABEL = 'Available';
+
+/** Stock can be fractional (line sold by weight) — never print 4038.0000001. */
+function formatQty(n) {
+  const v = Math.round((Number(n) || 0) * 100) / 100;
+  return String(v);
+}
+
+function maskQty(qty, threshold) {
+  const n = Number(qty) || 0;
+  return n > threshold ? MASK_LABEL : formatQty(n);
+}
+
 /** Category display rules: Bags reads as Kitbag, and blank is its own bucket. */
 const CATEGORY_RENAMES = { Bags: 'Kitbag' };
 const CATEGORY_FALLBACK = 'Other';
@@ -361,6 +382,9 @@ module.exports = {
   CATEGORY_RENAMES,
   CATEGORY_FALLBACK,
   UNBRANDED,
+  MASK_LABEL,
+  formatQty,
+  maskQty,
   tokenize,
   modelKey,
   isCleanName,

@@ -43,13 +43,13 @@ C:\sg_crm\
 │   │   ├── db\               connection.js, migrate.js, migrations\*.sql
 │   │   ├── zoho\             auth.js (OAuth), client.js (rate limit + budget), sync.js
 │   │   ├── services\         attribution, brands, performance, dormant, cheques,
-│   │   │                     focus, adminUser, stock, stock-report,
+│   │   │                     focus, adminUser, stock, stock-html, stock-report,
 │   │   │                     reminders\{engine,email,whatsapp}
 │   │   ├── routes\           one router per feature, mounted in routes\index.js
 │   │   ├── middleware\auth.js session guard
 │   │   └── jobs\cron.js      digest, stock report + sync schedules
 │   ├── scripts\backup-db.js  VACUUM INTO worker (called by backup-db.ps1)
-│   └── test\                 node:test suites (phase2..phase6, zoho, stock-report)
+│   └── test\                 node:test suites (phase2..phase6, zoho, stock-report, stock-html)
 ├── client\src\               React 18 + Vite: pages\, components\, api.js
 ├── client\dist\              build output, served in production (gitignored)
 ├── dist-installer\           sg_crm-setup.exe (gitignored)
@@ -328,29 +328,57 @@ Run now** with *dry run* ticked to see exactly what each rep would get today.
 ### 5.8 The dealer stock report
 
 **Settings → Stock Report** — a different audience from everything else in the
-CRM: this one goes to **dealers**, so quantities are masked.
+CRM: this one goes to **dealers**, so quantities are masked and the artifact is
+a file they can search on a phone.
 
-- **Send the report automatically** — off until you switch it on. It is never
-  enabled by default, because it mails people outside the company.
+Each mail carries **`Stock <date>.html`**: a self-contained offline browser with
+a search box (model, colour or SKU), brand and category chips, and tap-a-model
+for its colour breakdown. It needs no network and no app. The email body itself
+is only a per-brand summary pointing at the attachment.
+
+**Schedule** (global):
+
+- **Send automatically** — off until you switch it on. It is never enabled by
+  default, because it mails people outside the company.
 - **Send time** — default 08:30, **every day** (dealers order on Sundays too).
-  If the server is switched on *after* this time, the report goes out at boot
-  rather than skipping the day. It can only go out once per day either way.
-- **Hide quantities above** — default 25. More than this shows “Available”;
-  this number or fewer shows the exact count, which is the number a dealer
-  actually needs. The rule applies to model totals and colour rows alike.
+  If the server is switched on *after* this time, the day's mails go out at boot
+  rather than skipping the day. Each profile can only go out once per day.
 - **Refresh items from Zoho first** — pulls the `items` entity before composing.
-  If Zoho is down or disconnected the report still goes out on stored data and
-  says so in its footer.
-- **Recipients** — everyone is **Bcc**'d, so dealers never see each other.
-- **Exclude brands / categories** — tick anything the dealers should not see.
+  If Zoho is down or disconnected the mails still go out on stored data and say
+  so in the footer.
+
+**Recipient profiles** — the report is sent once *per profile*, so different
+dealers can get different catalogues from one schedule. A profile is:
+
+- **Recipients** — everyone in a profile is **Bcc**'d, so dealers never see
+  each other. A profile with no recipients is never sent.
+- **Hide quantities above** — default 25, and per profile. More than this shows
+  “Available”; this number or fewer shows the exact count, which is the number a
+  dealer actually needs. The rule applies to model totals, colour rows and the
+  attachment alike — **the real number is not written into the file at all**, so
+  handing it on cannot leak stock depth.
+- **Exclude brands / categories** — tick anything that profile should not see.
   `Unbranded` collects items no brand rule has claimed; most setups exclude it.
+- **Include in the daily send** — untick to pause a profile without deleting it.
+
+Adding a profile never sends anything immediately: it joins the next scheduled
+send. Per profile you can **Preview** the exact mail, **Download file** to check
+the attachment yourself, or **Send now** (which still respects that profile's
+once-a-day guard unless you pick *Force resend*). Every send is logged on the
+**Reminders** page under rule type *Stock report*.
+
+**Custom file** — build a one-off download with its own exclusions and
+threshold, for the dealer who asks for “just the rackets”. Nothing is emailed.
 
 Models are grouped automatically: colourways of one racket merge into a single
 row with per-colour sub-rows, while genuinely different sub-models (a 4U and a
-5U, or “FINAPI 232” and “FINAPI 232 XTRA POWER”) stay apart. Use **Preview** to
-see the exact email before switching it on, and **Send now** for a one-off (it
-still respects the once-a-day guard unless you pick *Force resend*). Every send
-is logged on the **Reminders** page under rule type *Stock report*.
+5U, or “FINAPI 232” and “FINAPI 232 XTRA POWER”) stay apart. Grouping happens
+within a brand, so two brands never merge into one invented model.
+
+> Upgrading from the pre-profile version: your existing recipients, exclusions
+> and threshold were migrated into a profile called **Default** on first start,
+> and the report keeps behaving exactly as before. The old single-config
+> settings no longer drive anything.
 
 ### 5.9 WhatsApp (optional, and read this honestly)
 

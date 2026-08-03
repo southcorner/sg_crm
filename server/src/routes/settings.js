@@ -61,13 +61,13 @@ const EDITABLE = {
   smtp_user: z.string().trim().max(255),
   smtp_pass: z.string().max(255),
   smtp_from: z.string().trim().max(255),
-  // daily dealer stock report
+  // Daily dealer stock report — the master switch and the schedule only.
+  // Recipients, exclusions and the threshold moved to stock_report_profiles
+  // (migration 003); the legacy settings keys of those names were migrated into
+  // a "Default" profile and are deliberately NOT editable here any more, so
+  // there is exactly one place each of them lives.
   stock_report_enabled: z.coerce.boolean(),
   stock_report_time: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'send time must look like HH:MM'),
-  stock_report_recipients: z.array(z.string().trim().email('not a valid email address')).max(200),
-  stock_report_threshold: z.coerce.number().int().min(1).max(10000),
-  stock_report_excluded_brands: z.array(z.coerce.number().int().min(0)).max(500),
-  stock_report_excluded_categories: z.array(z.string().trim().max(120)).max(500),
   stock_report_sync_first: z.coerce.boolean(),
 };
 

@@ -140,6 +140,12 @@ async function runStockReportJob() {
   return summary;
 }
 
+/** True when at least one enabled profile has somewhere to send. */
+function stockReportConfigured() {
+  const stockReport = require('../services/stock-report');
+  return stockReport.sendableProfiles({}).length > 0;
+}
+
 // ---------------------------------------------------------------------------
 // lifecycle
 // ---------------------------------------------------------------------------
@@ -184,9 +190,11 @@ function start() {
 }
 
 /**
- * Fire today's stock report if the machine came up after its send time and the
- * day has not gone out yet. The admin's routine is "switch the PC on in the
- * morning", so a boot at 09:10 must not silently lose the 08:30 slot.
+ * Fire today's stock reports if the machine came up after the send time and at
+ * least one profile has not gone out yet. The admin's routine is "switch the PC
+ * on in the morning", so a boot at 09:10 must not silently lose the 08:30 slot.
+ * Each profile keeps its own guard, so this can never double-send one that
+ * already went out.
  *
  * Gated on the same ENABLE_CRON switch as everything else: a process started
  * with schedulers off must not mail dealers either.
@@ -244,6 +252,7 @@ module.exports = {
   runDigestJob,
   runSyncJob,
   runStockReportJob,
+  stockReportConfigured,
   rescheduleDigest,
   rescheduleStockReport,
   stockReportCatchUp,
