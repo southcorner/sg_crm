@@ -147,7 +147,7 @@ const SETTING_DEFAULTS = {
   // Item photos are fetched one API call each, so only the categories where a
   // picture actually helps a dealer choose. A racket is identified by its model
   // name; a jersey or a shoe is not.
-  stock_image_categories: ['Badminton Jersey', 'Cycling Jersey', 'Shoes', 'String', 'Grip'],
+  stock_image_categories: ['Badminton Jersey', 'Cycling Jersey', 'Shoes', 'String', 'Grip', 'Bags'],
   // How many thumbnails one post-sync pass may fetch (0 disables the queue).
   stock_image_batch: 100,
 };
