@@ -401,15 +401,31 @@ colours; sizes open independently. Sizes come from the item's Size custom field
 2XL → …, not alphabetically. Masking applies at all three levels. Everything
 else keeps model → colour.
 
-**Item photos.** Items in `stock_image_categories` (jerseys, shoes, string,
-grip — a racket is identified by its model name, not its picture) get a
-thumbnail beside their colour row. Zoho charges one API call per picture, so
-they are cached under `data\item-images\`: after each item sync the queue tops
-the cache up within the daily budget (`stock_image_batch`, default 100 a pass),
-resumable, reporting through the `item_images` sync entity. A picture is
-re-fetched only when Zoho gives the item a new image document id — replacing a
-photo refreshes it, nothing else does. Only a 128px JPEG is kept, never the
-original. An item with no picture renders exactly as before: no placeholder.
+**Item photos.** Items in `stock_image_categories` (jerseys, shoes, kitbags,
+string, grip — a racket is identified by its model name, not its picture) get a
+thumbnail beside their colour row. **Tap a photo to enlarge it**: a full-screen
+view with the model and colour underneath, closed by the ✕, by tapping the
+backdrop, or with Escape. Tapping a photo never opens or closes the row it sits
+in.
+
+Zoho charges one API call per picture, so they are cached under
+`data\item-images\`: after each item sync the queue tops the cache up within the
+daily budget (`stock_image_batch`, default 100 a pass), resumable, reporting
+through the `item_images` sync entity. An item with no picture renders exactly
+as before: no placeholder.
+
+**One rendition serves both uses** — shrunk to 44px in the row, shown large in
+the enlarged view. `stock_image_max_edge` (default 320) is the longest edge;
+the original is never stored, because every embedded byte is base64'd into a
+mail attachment. Two things make a cached picture stale, and both re-fetch
+automatically within the budget:
+
+- Zoho minting a new image document id, i.e. somebody replaced the photo;
+- the rendition changing. Each row records the size it was fetched at
+  (`320q72`), so raising `stock_image_max_edge` re-downloads the cache at the
+  new size. Bigger pictures mean a bigger attachment — watch the guardrail
+  below, and check `SELECT AVG(bytes) FROM item_images WHERE status='ok'` after
+  a size change to see what it actually cost.
 
 If a profile's file would still exceed 5 MB with photos in it
 (`stock_max_attachment_bytes`), it is regenerated without them and a warning is

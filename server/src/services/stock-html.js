@@ -265,7 +265,24 @@ const PAGE_CSS = `
   .cr { display:flex; align-items:center; gap:8px; font-size:13.5px; padding:3px 0; color:var(--sub); }
   .cr b { color:var(--ink); font-weight:500; flex:1; min-width:0; }
   .cr span { white-space:nowrap; }
-  .thumb { width:34px; height:34px; flex:0 0 auto; object-fit:cover; border-radius:5px; background:var(--chipbg); }
+  /* the row thumbnail is a tap target in its own right — hence the size bump
+     from 34 to 44, the zoom cursor and the press feedback */
+  .thumb { width:44px; height:44px; flex:0 0 auto; object-fit:cover; border-radius:6px;
+           background:var(--chipbg); cursor:zoom-in; transition:transform .12s; }
+  .thumb:active { transform:scale(.94); }
+  /* --- lightbox: one overlay reused by every picture --- */
+  #lb { position:fixed; inset:0; z-index:50; display:none; background:rgba(8,12,16,.92);
+        align-items:center; justify-content:center; flex-direction:column; gap:14px; padding:16px; }
+  #lb.on { display:flex; }
+  #lb img { max-width:92vw; max-height:80vh; border-radius:10px; background:#0d1319;
+            box-shadow:0 10px 40px rgba(0,0,0,.5); }
+  #lbcap { color:#e8edf2; font-size:14px; text-align:center; max-width:92vw; line-height:1.4; }
+  #lbcap small { display:block; color:#95a3b0; font-size:12px; margin-top:2px; }
+  #lbx { position:absolute; top:8px; right:8px; width:44px; height:44px; border:0; border-radius:50%;
+         background:rgba(255,255,255,.14); color:#fff; font-size:22px; line-height:44px; padding:0;
+         cursor:pointer; }
+  #lbx:active { background:rgba(255,255,255,.28); }
+  body.lb-open { overflow:hidden; }
   /* jersey level 2: size rows, each opening independently of its siblings */
   .sz { border-top:1px solid var(--line); }
   .sz:first-child { border-top:0; }
@@ -336,19 +353,51 @@ function el(tag, className, text) {
   return node;
 }
 
-function colourRow(v) {
+function colourRow(v, model) {
   const row = el('div', 'cr');
   if (v.i !== undefined && IMG[v.i]) {
     const img = el('img', 'thumb');
     img.src = IMG[v.i];
-    img.alt = '';
+    img.alt = v.c;
     img.loading = 'lazy';
+    // the picture is its own tap target: opening it must not also toggle the
+    // row or the card underneath it
+    img.onclick = (e) => { e.stopPropagation(); openLightbox(IMG[v.i], model, v.c); };
     row.appendChild(img);
   }
   row.appendChild(el('b', null, v.c));
   row.appendChild(el('span', null, v.q));
   return row;
 }
+
+/* --- lightbox ---------------------------------------------------------- */
+const lb = document.getElementById('lb');
+const lbImg = document.getElementById('lbimg');
+const lbCap = document.getElementById('lbcap');
+
+function openLightbox(src, model, colour) {
+  lbImg.src = src;
+  lbImg.alt = model + ' ' + colour;
+  lbCap.textContent = model;
+  const sub = document.createElement('small');
+  sub.textContent = colour;
+  lbCap.appendChild(sub);
+  lb.classList.add('on');
+  // a phone must not scroll the list behind the overlay
+  document.body.classList.add('lb-open');
+}
+
+function closeLightbox() {
+  lb.classList.remove('on');
+  document.body.classList.remove('lb-open');
+  // drop the data URI so the browser can release it
+  lbImg.removeAttribute('src');
+}
+
+document.getElementById('lbx').onclick = closeLightbox;
+// a tap on the backdrop closes; a tap on the picture itself does not
+lb.onclick = (e) => { if (e.target === lb || e.target === lbCap) closeLightbox(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && lb.classList.contains('on')) closeLightbox(); });
 
 function buildCard(d) {
   const card = el('div', 'card');
@@ -369,14 +418,14 @@ function buildCard(d) {
       head.appendChild(el('b', null, sz.s));
       head.appendChild(el('span', 'szq', sz.q));
       const body = el('div', 'sz-body');
-      for (const v of sz.v) body.appendChild(colourRow(v));
+      for (const v of sz.v) body.appendChild(colourRow(v, d.m));
       head.onclick = (e) => { e.stopPropagation(); wrap.classList.toggle('open'); };
       wrap.appendChild(head);
       wrap.appendChild(body);
       colors.appendChild(wrap);
     }
   } else {
-    for (const v of d.v) colors.appendChild(colourRow(v));
+    for (const v of d.v) colors.appendChild(colourRow(v, d.m));
   }
 
   card.appendChild(colors);
@@ -448,13 +497,18 @@ function generate({
 </head>
 <body>
 <header>
-  <h1>${escHtml(heading)} <small>· ${escHtml(date)} · tap a model for details</small></h1>
+  <h1>${escHtml(heading)} <small>· ${escHtml(date)} · tap a model for details, a photo to enlarge</small></h1>
   <input id="q" type="search" placeholder="Search model, colour or SKU…" autocomplete="off">
   <div class="chips" id="brandChips"></div>
   <div class="chips" id="catChips"></div>
 </header>
 <div id="count"></div>
 <div id="list"></div>
+<div id="lb" role="dialog" aria-modal="true" aria-label="Item photo">
+  <button id="lbx" type="button" aria-label="Close">×</button>
+  <img id="lbimg" alt="">
+  <div id="lbcap"></div>
+</div>
 <p class="foot">Quantities above ${escHtml(String(threshold))} are shown as “Available”.<br>Works offline — save this file and open it any time.</p>
 <script>${pageScript(rows, brands, cats, RENDER_CAP, images)}
 </script>

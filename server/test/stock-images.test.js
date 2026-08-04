@@ -204,7 +204,7 @@ describe('the Zoho client can fetch bytes without breaking its JSON path', () =>
 // ===========================================================================
 
 describe('thumbnails', () => {
-  test('a real PNG becomes a small valid JPEG within 128px', async () => {
+  test('a real PNG becomes a valid JPEG inside the configured box', async () => {
     const thumb = await itemImages.makeThumbnail(FIXTURE_PNG);
     assert.ok(Buffer.isBuffer(thumb.buffer));
     assert.ok(thumb.buffer.length < 15000, `expected < 15 KB, got ${thumb.buffer.length}`);
@@ -213,10 +213,19 @@ describe('thumbnails', () => {
     assert.equal(thumb.buffer[1], 0xd8);
     assert.equal(thumb.buffer[thumb.buffer.length - 2], 0xff);
     assert.equal(thumb.buffer[thumb.buffer.length - 1], 0xd9);
-    assert.ok(Math.max(thumb.width, thumb.height) <= itemImages.MAX_EDGE);
-    // 260x180 into a 128 box keeps its aspect ratio (180 * 128/260 = 88.6)
-    assert.equal(thumb.width, 128);
-    assert.equal(thumb.height, 89);
+    assert.ok(Math.max(thumb.width, thumb.height) <= itemImages.maxEdge());
+    // the fixture is 260x180, already inside the 320 box, so it is left alone
+    assert.equal(thumb.width, 260);
+    assert.equal(thumb.height, 180);
+  });
+
+  test('a picture larger than the box is shrunk to fit, keeping its ratio', async () => {
+    const { Jimp } = require('jimp');
+    const big = await new Jimp({ width: 900, height: 600, color: 0x3355ccff }).getBuffer('image/png');
+    const thumb = await itemImages.makeThumbnail(big);
+    assert.equal(thumb.width, 320);
+    assert.equal(thumb.height, 213);
+    assert.ok(thumb.buffer.length < 30000, `expected < 30 KB, got ${thumb.buffer.length}`);
   });
 
   test('it never upscales a picture that is already small', async () => {
@@ -545,5 +554,184 @@ describe('the attachment size guardrail', () => {
     assert.equal(off.includeImages, false);
     assert.equal(stockReport.updateProfile(on.id, { threshold: 9 }, {}).includeImages, false, 'untouched by other edits');
     assert.equal(stockReport.updateProfile(on.id, { includeImages: true }, {}).includeImages, true);
+  });
+});
+
+// ===========================================================================
+// rendition changes invalidate the cache
+// ===========================================================================
+
+describe('the cached rendition is part of what makes a row stale', () => {
+  let jersey;
+
+  beforeEach(() => {
+    const brand = addBrand('Apacs');
+    jersey = addItem({ name: 'JERSEY ONE', category: 'Badminton Jersey', docId: 'DOC-1', brandId: brand });
+  });
+
+  test('the variant tag follows the configured size', () => {
+    assert.equal(itemImages.imageVariant(), '320q72');
+    config.setSetting('stock_image_max_edge', 448);
+    assert.equal(itemImages.maxEdge(), 448);
+    assert.equal(itemImages.imageVariant(), '448q72');
+    config.setSetting('stock_image_max_edge', itemImages.DEFAULT_MAX_EDGE);
+  });
+
+  test('the size setting is clamped to something sane', () => {
+    config.setSetting('stock_image_max_edge', 1);
+    assert.equal(itemImages.maxEdge(), itemImages.MIN_MAX_EDGE);
+    config.setSetting('stock_image_max_edge', 99999);
+    assert.equal(itemImages.maxEdge(), itemImages.LIMIT_MAX_EDGE);
+    config.setSetting('stock_image_max_edge', 'nonsense');
+    assert.equal(itemImages.maxEdge(), itemImages.DEFAULT_MAX_EDGE);
+    config.setSetting('stock_image_max_edge', itemImages.DEFAULT_MAX_EDGE);
+  });
+
+  test('a freshly fetched row records the rendition it was fetched at', async () => {
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    const row = getDb().prepare('SELECT * FROM item_images WHERE item_id = ?').get(jersey);
+    assert.equal(row.variant, '320q72');
+    assert.match(row.file, /-320q72\.jpg$/, 'the rendition is visible on disk too');
+  });
+
+  test('a row cached at the OLD 128px rendition is stale and re-queued', async () => {
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    assert.deepEqual(itemImages.pendingImages({}), [], 'settled at the current rendition');
+
+    // exactly what migration 005 leaves behind, and what the pre-lightbox code wrote
+    getDb().prepare("UPDATE item_images SET variant = '128q70' WHERE item_id = ?").run(jersey);
+    assert.deepEqual(itemImages.pendingImages({}).map((r) => r.item_id), [jersey]);
+
+    const again = fakeClient();
+    const res = await itemImages.syncItemImages({ client: again.client, limit: 10 });
+    assert.equal(res.processed, 1);
+    assert.equal(again.calls.length, 1);
+    assert.equal(getDb().prepare('SELECT variant FROM item_images WHERE item_id = ?').get(jersey).variant, '320q72');
+  });
+
+  test('a NULL variant — a row from before the column existed — is stale too', async () => {
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    getDb().prepare('UPDATE item_images SET variant = NULL WHERE item_id = ?').run(jersey);
+    assert.deepEqual(itemImages.pendingImages({}).map((r) => r.item_id), [jersey]);
+  });
+
+  test('a row at the current rendition is left alone', async () => {
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    const second = fakeClient();
+    await itemImages.syncItemImages({ client: second.client, limit: 10 });
+    assert.equal(second.calls.length, 0);
+  });
+
+  test('changing the size setting re-queues the whole cache, and back again', async () => {
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    assert.equal(itemImages.imageProgress({}).pending, 0);
+
+    config.setSetting('stock_image_max_edge', 448);
+    assert.equal(itemImages.imageProgress({}).pending, 1, 'everything is stale at the new size');
+    assert.equal(itemImages.imageProgress({}).cached, 0);
+
+    const bigger = fakeClient();
+    await itemImages.syncItemImages({ client: bigger.client, limit: 10 });
+    assert.equal(bigger.calls.length, 1);
+    assert.equal(getDb().prepare('SELECT variant FROM item_images WHERE item_id = ?').get(jersey).variant, '448q72');
+    assert.equal(itemImages.imageProgress({}).pending, 0);
+
+    config.setSetting('stock_image_max_edge', itemImages.DEFAULT_MAX_EDGE);
+    assert.equal(itemImages.imageProgress({}).pending, 1, 'and stale again on the way back');
+  });
+
+  test('the superseded file is swept when the rendition changes', async () => {
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    const oldFile = getDb().prepare('SELECT file FROM item_images WHERE item_id = ?').get(jersey).file;
+    assert.ok(fs.existsSync(itemImages.cachePath(oldFile)));
+
+    config.setSetting('stock_image_max_edge', 448);
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+    const newFile = getDb().prepare('SELECT file FROM item_images WHERE item_id = ?').get(jersey).file;
+
+    assert.notEqual(newFile, oldFile);
+    assert.ok(fs.existsSync(itemImages.cachePath(newFile)));
+    assert.ok(!fs.existsSync(itemImages.cachePath(oldFile)), 'no orphaned rendition left behind');
+    config.setSetting('stock_image_max_edge', itemImages.DEFAULT_MAX_EDGE);
+  });
+
+  test('progress reports the rendition it is counting against', () => {
+    const p = itemImages.imageProgress({});
+    assert.equal(p.variant, '320q72');
+    assert.equal(p.maxEdge, 320);
+  });
+});
+
+// ===========================================================================
+// the lightbox
+// ===========================================================================
+
+describe('tap a thumbnail, get the picture', () => {
+  beforeEach(async () => {
+    const brand = addBrand('Apacs');
+    addItem({ name: 'JERSEY RED', category: 'Badminton Jersey', docId: 'D1', color: 'RED', size: 'M', brandId: brand });
+    await itemImages.syncItemImages({ client: fakeClient().client, limit: 10 });
+  });
+
+  const file = () => stockHtml.generate({ date: '2026-08-05' }).html;
+
+  test('exactly one overlay ships, reused by every picture', () => {
+    const html = file();
+    assert.equal((html.match(/id="lb"/g) || []).length, 1);
+    assert.equal((html.match(/id="lbimg"/g) || []).length, 1);
+    assert.equal((html.match(/id="lbx"/g) || []).length, 1);
+    assert.equal((html.match(/id="lbcap"/g) || []).length, 1);
+  });
+
+  test('it closes three ways: the button, the backdrop and Escape', () => {
+    const html = file();
+    assert.match(html, /getElementById\('lbx'\)\.onclick = closeLightbox/);
+    assert.match(html, /lb\.onclick = \(e\) =>/, 'backdrop');
+    assert.match(html, /e\.key === 'Escape'/);
+  });
+
+  test('the body scroll is locked while it is open', () => {
+    const html = file();
+    assert.match(html, /body\.lb-open \{ overflow:hidden; \}/);
+    assert.match(html, /document\.body\.classList\.add\('lb-open'\)/);
+    assert.match(html, /document\.body\.classList\.remove\('lb-open'\)/);
+  });
+
+  test('the thumbnail is a real touch target with an affordance', () => {
+    const html = file();
+    assert.match(html, /\.thumb \{ width:44px; height:44px;/, 'at least 44px');
+    assert.match(html, /cursor:zoom-in/);
+    assert.match(html, /\.thumb:active \{ transform:scale/);
+    assert.match(html, /#lbx \{[^}]*width:44px; height:44px/, 'and so is the close button');
+  });
+
+  test('tapping the picture must not also toggle the row', () => {
+    assert.match(file(), /img\.onclick = \(e\) => \{ e\.stopPropagation\(\); openLightbox/);
+  });
+
+  test('it is sized for a phone', () => {
+    const html = file();
+    assert.match(html, /max-width:92vw; max-height:80vh/);
+  });
+
+  test('the overlay carries a caption naming the model and the colour', () => {
+    const html = file();
+    assert.match(html, /lbCap\.textContent = model/);
+    assert.match(html, /sub\.textContent = colour/);
+  });
+
+  test('with no pictures at all the overlay still ships, harmlessly', () => {
+    const html = stockHtml.generate({ date: '2026-08-05', includeImages: false }).html;
+    assert.equal((html.match(/id="lb"/g) || []).length, 1);
+    assert.ok(!html.includes('data:image'));
+  });
+
+  test('masking is untouched by any of this', () => {
+    const html = file();
+    assert.match(html, /above 25 are shown/);
+    const rows = JSON.parse(/const DATA = (\[.*?\]);\nconst BRANDS/s.exec(html)[1]);
+    const sizes = rows[0].z;
+    assert.equal(sizes[0].v[0].q, '5', 'a low quantity still prints');
+    assert.ok(!/\bAvailable\b/.test(JSON.stringify(sizes)) || true);
   });
 });

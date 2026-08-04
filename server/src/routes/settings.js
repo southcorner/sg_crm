@@ -77,6 +77,8 @@ const EDITABLE = {
   // which categories get item photos, and how many to fetch per sync pass
   stock_image_categories: z.array(z.string().trim().max(120)).max(100),
   stock_image_batch: z.coerce.number().int().min(0).max(2000),
+  // raising or lowering this re-fetches every cached picture at the new size
+  stock_image_max_edge: z.coerce.number().int().min(96).max(768),
 };
 
 /** Written but never returned. */

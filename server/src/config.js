@@ -150,6 +150,11 @@ const SETTING_DEFAULTS = {
   stock_image_categories: ['Badminton Jersey', 'Cycling Jersey', 'Shoes', 'String', 'Grip', 'Bags'],
   // How many thumbnails one post-sync pass may fetch (0 disables the queue).
   stock_image_batch: 100,
+  // Longest edge of the cached rendition. One file serves both the small row
+  // thumbnail and the tap-to-enlarge view, so this trades picture quality
+  // against attachment size — and changing it invalidates the whole cache by
+  // design (services/item-images.js `imageVariant`).
+  stock_image_max_edge: 320,
 };
 
 function db() {

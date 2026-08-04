@@ -229,7 +229,9 @@ describe('the document itself', () => {
     const html = stockHtml.generate({ date: DATE }).html;
     assert.ok(!/<script[^>]+src=/i.test(html), 'no external script');
     assert.ok(!/<link[^>]+stylesheet/i.test(html), 'no external stylesheet');
-    assert.ok(!/<img/i.test(html), 'no images');
+    // the lightbox ships one empty <img> that is filled from the embedded data
+    // URIs at runtime; what must not exist is an image fetched from anywhere
+    assert.ok(!/<img[^>]+src=["']?(?!data:)/i.test(html), 'no externally-sourced image');
     assert.ok(!/https?:\/\//i.test(html), 'no outbound URLs at all');
   });
 
@@ -284,7 +286,12 @@ describe('escaping: the payload is admin-controlled text', () => {
     const brand = addBrand('<img src=x onerror=alert(1)>');
     addItem({ name: 'ALPHA ONE', sku: 'SK-A', afs: 5, category: 'Racket', brandId: brand });
     const file = stockHtml.generate({ date: DATE });
-    assert.ok(!/<img/i.test(file.html));
+    // The injected tag must never become live markup. It survives verbatim as a
+    // STRING inside the JSON payload — "onerror=..." is in the file as data, and
+    // that is fine, because its `<` is escaped so it can never open a tag and
+    // the renderer only ever assigns it via textContent.
+    assert.ok(!/<img src=x/i.test(file.html), 'the injected tag never opens');
+    assert.equal((file.html.match(/<img/gi) || []).length, 1, 'the only <img> is the lightbox');
     assert.equal(extractArray(file.html, 'BRANDS')[0], '<img src=x onerror=alert(1)>');
     assert.ok(file.html.includes('\\u003cimg'), 'the < is escaped inside the JSON payload');
   });

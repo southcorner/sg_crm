@@ -11,13 +11,18 @@
  *     (`stock_image_categories`: jerseys, shoes, string, grip — a racket is
  *     identified by its model name, not its photo);
  *   * only items that HAVE a picture (`image_document_id` in the payload);
- *   * only a 128px JPEG thumbnail is kept, never the original. A few KB each is
- *     what makes embedding hundreds of them in one HTML file viable at all.
+ *   * only ONE modest JPEG rendition is kept, never the original. That single
+ *     file is shrunk to ~44px in a colour row and shown full-screen when the
+ *     row is tapped, because every embedded byte is base64'd into a mail
+ *     attachment and the 5 MB guardrail is the real constraint.
  *
- * Staleness is exact rather than time-based: Zoho mints a new
- * `image_document_id` when the picture is replaced, so a cached row whose
- * `doc_id` differs from the item's current one is stale by definition and
- * nothing else needs re-fetching. See migration 004.
+ * Staleness is exact rather than time-based, on two axes:
+ *   * Zoho mints a new `image_document_id` when the picture is replaced, so a
+ *     cached row whose `doc_id` differs is stale by definition (migration 004);
+ *   * a row also carries the `variant` it was fetched at ("320q72"), so
+ *     changing the configured size re-fetches the cache automatically rather
+ *     than needing a migration that knows about any particular size
+ *     (migration 005).
  *
  * The queue behaves like the invoice line-item backfill: budget-aware,
  * resumable, and it reports through `sync_state` under the entity
@@ -32,11 +37,27 @@ const config = require('../config');
 const logger = require('../logger');
 
 const SYNC_ENTITY = 'item_images';
-const DEFAULT_CATEGORIES = ['Badminton Jersey', 'Cycling Jersey', 'Shoes', 'String', 'Grip'];
+const DEFAULT_CATEGORIES = ['Badminton Jersey', 'Cycling Jersey', 'Shoes', 'String', 'Grip', 'Bags'];
 const DEFAULT_BATCH = 200;
-/** Thumbnails are for a phone list; 128px is generous already. */
-const MAX_EDGE = 128;
-const JPEG_QUALITY = 70;
+
+/**
+ * ONE cached rendition serves both uses: shrunk to ~44px in a colour row, and
+ * shown full-screen when the row's thumbnail is tapped. Storing the original as
+ * well would be simpler, but every embedded byte is base64'd into a mail
+ * attachment, and the 5 MB guardrail is the real constraint.
+ *
+ * 320 is the low end of a sensible range on purpose. A full stock file
+ * references ~490 colour-row pictures, which the dedupe collapses to roughly
+ * 136 distinct images (measured 3.58x sharing on the live cache — one photo
+ * covers every size of a garment). 136 images inside a 5 MB budget leaves about
+ * 26 KB each AFTER base64's 4/3 inflation, and a 320px q72 photo lands
+ * comfortably inside that where a 448px one would not. Bigger is available by
+ * raising `stock_image_max_edge`; the guardrail still has the final say.
+ */
+const DEFAULT_MAX_EDGE = 320;
+const MIN_MAX_EDGE = 96;
+const LIMIT_MAX_EDGE = 768;
+const JPEG_QUALITY = 72;
 
 let jimpModule = null;
 function jimp() {
@@ -65,16 +86,35 @@ function imageCategories() {
   return [...DEFAULT_CATEGORIES];
 }
 
+/** The configured longest edge for a cached picture. */
+function maxEdge() {
+  const n = Math.trunc(Number(config.getSetting('stock_image_max_edge', DEFAULT_MAX_EDGE)));
+  if (!Number.isFinite(n)) return DEFAULT_MAX_EDGE;
+  return Math.min(Math.max(n, MIN_MAX_EDGE), LIMIT_MAX_EDGE);
+}
+
+/**
+ * The rendition tag stored on every cached row: "320q72".
+ *
+ * This is the whole cache-invalidation mechanism. A row whose variant differs
+ * from the current one is stale by definition, so changing the size (or the
+ * quality constant, in some later release) re-fetches everything automatically
+ * — no migration has to know about any particular size.
+ */
+function imageVariant() {
+  return `${maxEdge()}q${JPEG_QUALITY}`;
+}
+
 function cacheDir() {
   const dir = path.join(config.DATA_DIR, 'item-images');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-/** Cache filename for an item+doc pair — doc id in the name makes staleness visible. */
-function cacheFileName(itemId, docId) {
+/** Cache filename: item, doc id and rendition, so staleness is visible on disk. */
+function cacheFileName(itemId, docId, variant = imageVariant()) {
   const safe = (s) => String(s).replace(/[^A-Za-z0-9_-]/g, '');
-  return `${safe(itemId)}-${safe(docId).slice(-16)}.jpg`;
+  return `${safe(itemId)}-${safe(docId).slice(-16)}-${safe(variant)}.jpg`;
 }
 
 function cachePath(file) {
@@ -112,7 +152,8 @@ function scopeSql(categories) {
  *
  * `missing` rows are excluded while their doc id is unchanged — Zoho already
  * told us there is no picture there — but `error` rows ARE re-queued, or a
- * one-off network blip would cost that item its picture permanently.
+ * one-off network blip would cost that item its picture permanently, and so is
+ * anything cached at a different rendition than the one now configured.
  */
 function pendingImages({ db = getDb(), limit = null } = {}) {
   const categories = imageCategories();
@@ -125,10 +166,11 @@ function pendingImages({ db = getDb(), limit = null } = {}) {
          FROM (${sql}) s
          LEFT JOIN item_images c ON c.item_id = s.item_id
         WHERE c.item_id IS NULL OR c.doc_id <> s.doc_id OR c.status = 'error'
+           OR c.variant IS NULL OR c.variant <> @variant
         ORDER BY s.item_id
         ${limit ? 'LIMIT @limit' : ''}`
     )
-    .all({ ...params, ...(limit ? { limit } : {}) });
+    .all({ ...params, variant: imageVariant(), ...(limit ? { limit } : {}) });
 }
 
 /** Cache health, for the sync status UI and the queue itself. */
@@ -140,18 +182,21 @@ function imageProgress({ db = getDb() } = {}) {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS in_scope,
-              SUM(CASE WHEN c.item_id IS NOT NULL AND c.doc_id = s.doc_id AND c.status = 'ok' THEN 1 ELSE 0 END) AS cached,
+              SUM(CASE WHEN c.item_id IS NOT NULL AND c.doc_id = s.doc_id AND c.status = 'ok' AND c.variant = @variant THEN 1 ELSE 0 END) AS cached,
               SUM(CASE WHEN c.item_id IS NOT NULL AND c.doc_id = s.doc_id AND c.status = 'missing' THEN 1 ELSE 0 END) AS missing,
-              SUM(CASE WHEN c.item_id IS NULL OR c.doc_id <> s.doc_id OR c.status = 'error' THEN 1 ELSE 0 END) AS pending
+              SUM(CASE WHEN c.item_id IS NULL OR c.doc_id <> s.doc_id OR c.status = 'error'
+                            OR c.variant IS NULL OR c.variant <> @variant THEN 1 ELSE 0 END) AS pending
          FROM (${sql}) s
          LEFT JOIN item_images c ON c.item_id = s.item_id`
     )
-    .get(params);
+    .get({ ...params, variant: imageVariant() });
 
   const bytes = db.prepare("SELECT COALESCE(SUM(bytes), 0) AS b FROM item_images WHERE status = 'ok'").get().b;
 
   return {
     categories,
+    variant: imageVariant(),
+    maxEdge: maxEdge(),
     inScope: Number(row.in_scope || 0),
     cached: Number(row.cached || 0),
     missing: Number(row.missing || 0),
@@ -167,19 +212,20 @@ async function makeThumbnail(buffer) {
   // Only shrink. jimp's scaleToFit happily ENLARGES a small picture to fill the
   // box, which costs bytes and looks worse than the original — a 40px image
   // stays 40px.
-  if (img.width > MAX_EDGE || img.height > MAX_EDGE) img.scaleToFit({ w: MAX_EDGE, h: MAX_EDGE });
+  const edge = maxEdge();
+  if (img.width > edge || img.height > edge) img.scaleToFit({ w: edge, h: edge });
   const out = await img.getBuffer('image/jpeg', { quality: JPEG_QUALITY });
   return { buffer: out, width: img.width, height: img.height };
 }
 
-function recordImage({ db = getDb(), itemId, docId, file, bytes, width, height, status, error = null }) {
+function recordImage({ db = getDb(), itemId, docId, file, bytes, width, height, status, error = null, variant = imageVariant() }) {
   db.prepare(
-    `INSERT INTO item_images (item_id, doc_id, file, bytes, width, height, status, error, fetched_at)
-     VALUES (@item_id, @doc_id, @file, @bytes, @width, @height, @status, @error, datetime('now'))
+    `INSERT INTO item_images (item_id, doc_id, file, bytes, width, height, status, error, variant, fetched_at)
+     VALUES (@item_id, @doc_id, @file, @bytes, @width, @height, @status, @error, @variant, datetime('now'))
      ON CONFLICT(item_id) DO UPDATE SET
        doc_id = excluded.doc_id, file = excluded.file, bytes = excluded.bytes,
        width = excluded.width, height = excluded.height, status = excluded.status,
-       error = excluded.error, fetched_at = excluded.fetched_at`
+       error = excluded.error, variant = excluded.variant, fetched_at = excluded.fetched_at`
   ).run({
     item_id: itemId,
     doc_id: docId,
@@ -189,6 +235,7 @@ function recordImage({ db = getDb(), itemId, docId, file, bytes, width, height, 
     height: height || null,
     status,
     error,
+    variant,
   });
 }
 
@@ -377,8 +424,12 @@ module.exports = {
   SYNC_ENTITY,
   DEFAULT_CATEGORIES,
   DEFAULT_BATCH,
-  MAX_EDGE,
+  DEFAULT_MAX_EDGE,
+  MIN_MAX_EDGE,
+  LIMIT_MAX_EDGE,
   JPEG_QUALITY,
+  maxEdge,
+  imageVariant,
   imageCategories,
   cacheDir,
   cacheFileName,
