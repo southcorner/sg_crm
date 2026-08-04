@@ -361,6 +361,7 @@ function ProfileRow({ profile, brands, lastRun, busy, onEdit, onPreview, onSend,
         <StatusChip value={profile.enabled ? 'on' : 'paused'} tone={profile.enabled ? 'ok' : 'muted'} />
         <span className="profile-meta">
           {profile.recipients.length} recipient(s) · hides above {profile.threshold}
+          {profile.includeImages === false ? ' · no photos' : ''}
         </span>
         <div className="spacer" />
         {lastRun ? (
@@ -436,6 +437,7 @@ function ProfileEditor({ profile, brands, categories, defaultThreshold, pending,
     excludedBrands: (profile?.excludedBrands || []).map(Number),
     excludedCategories: profile?.excludedCategories || [],
     threshold: String(profile?.threshold ?? defaultThreshold),
+    includeImages: profile ? profile.includeImages !== false : true,
     enabled: profile ? profile.enabled : true,
   }));
   const [recipientInput, setRecipientInput] = useState('');
@@ -463,6 +465,7 @@ function ProfileEditor({ profile, brands, categories, defaultThreshold, pending,
           excludedBrands: form.excludedBrands,
           excludedCategories: form.excludedCategories,
           threshold: Number(form.threshold) || defaultThreshold,
+          includeImages: form.includeImages,
           enabled: form.enabled,
         });
       }}
@@ -493,6 +496,14 @@ function ProfileEditor({ profile, brands, categories, defaultThreshold, pending,
         <label className="checkbox-field">
           <input type="checkbox" checked={form.enabled} onChange={(e) => set('enabled', e.target.checked)} />
           Include in the daily send
+        </label>
+        <label className="checkbox-field">
+          <input
+            type="checkbox"
+            checked={form.includeImages}
+            onChange={(e) => set('includeImages', e.target.checked)}
+          />
+          Show item photos
         </label>
       </div>
 
@@ -605,11 +616,13 @@ function CustomFileCard({ brands, categories, defaultThreshold }) {
   const [excludedBrands, setExcludedBrands] = useState([]);
   const [excludedCategories, setExcludedCategories] = useState([]);
   const [threshold, setThreshold] = useState(String(defaultThreshold));
+  const [withImages, setWithImages] = useState(true);
 
   const href = `/api/stock-report/file${qs({
     threshold: Number(threshold) || defaultThreshold,
     brands: excludedBrands.join(','),
     categories: excludedCategories.join(','),
+    images: withImages ? '' : '0',
   })}`;
 
   return (
@@ -629,6 +642,10 @@ function CustomFileCard({ brands, categories, defaultThreshold }) {
             value={threshold}
             onChange={(e) => setThreshold(e.target.value)}
           />
+        </label>
+        <label className="checkbox-field">
+          <input type="checkbox" checked={withImages} onChange={(e) => setWithImages(e.target.checked)} />
+          Show item photos
         </label>
       </div>
       <ExclusionPicker

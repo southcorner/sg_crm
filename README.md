@@ -43,18 +43,19 @@ C:\sg_crm\
 │   │   ├── db\               connection.js, migrate.js, migrations\*.sql
 │   │   ├── zoho\             auth.js (OAuth), client.js (rate limit + budget), sync.js
 │   │   ├── services\         attribution, brands, performance, dormant, cheques,
-│   │   │                     focus, adminUser, stock, stock-html, stock-report,
+│   │   │                     focus, adminUser, stock, stock-html, stock-report, item-images,
 │   │   │                     reminders\{engine,email,whatsapp}
 │   │   ├── routes\           one router per feature, mounted in routes\index.js
 │   │   ├── middleware\auth.js session guard
 │   │   └── jobs\cron.js      digest, stock report + sync schedules
 │   ├── scripts\backup-db.js  VACUUM INTO worker (called by backup-db.ps1)
-│   └── test\                 node:test suites (phase2..phase6, zoho, stock-report, stock-html)
+│   └── test\                 node:test suites (phase2..phase6, zoho, stock-*, images)
 ├── client\src\               React 18 + Vite: pages\, components\, api.js
 ├── client\dist\              build output, served in production (gitignored)
 ├── dist-installer\           sg_crm-setup.exe (gitignored)
 └── data\                     runtime, gitignored
     ├── crm.db (+ -wal, -shm)
+    ├── item-images        cached 128px JPEG thumbnails
     ├── backups\crm-YYYYMMDD-HHMMSS.db
     ├── logs\{app.log, service-out.log, service-err.log, backup.log}
     └── wwebjs\               the WhatsApp session
@@ -375,6 +376,8 @@ dealers can get different catalogues from one schedule. A profile is:
 - **Exclude brands / categories** — tick anything that profile should not see.
   `Unbranded` collects items no brand rule has claimed; most setups exclude it.
 - **Include in the daily send** — untick to pause a profile without deleting it.
+- **Show item photos** — embeds a thumbnail beside each colour (see below).
+  Untick for a leaner file.
 
 Adding a profile never sends anything immediately: it joins the next scheduled
 send. Per profile you can **Preview** the exact mail, **Download file** to check
@@ -389,6 +392,28 @@ Models are grouped automatically: colourways of one racket merge into a single
 row with per-colour sub-rows, while genuinely different sub-models (a 4U and a
 5U, or “FINAPI 232” and “FINAPI 232 XTRA POWER”) stay apart. Grouping happens
 within a brand, so two brands never merge into one invented model.
+
+**Jerseys get an extra level.** For the two jersey categories the file reads
+model → **size** → colour, because "which sizes are left" is the question a
+dealer asks about a garment. Tap a model for its sizes, tap a size for its
+colours; sizes open independently. Sizes come from the item's Size custom field
+(falling back to the item name, then "Free size") and sort XS → S → M → L → XL →
+2XL → …, not alphabetically. Masking applies at all three levels. Everything
+else keeps model → colour.
+
+**Item photos.** Items in `stock_image_categories` (jerseys, shoes, string,
+grip — a racket is identified by its model name, not its picture) get a
+thumbnail beside their colour row. Zoho charges one API call per picture, so
+they are cached under `data\item-images\`: after each item sync the queue tops
+the cache up within the daily budget (`stock_image_batch`, default 100 a pass),
+resumable, reporting through the `item_images` sync entity. A picture is
+re-fetched only when Zoho gives the item a new image document id — replacing a
+photo refreshes it, nothing else does. Only a 128px JPEG is kept, never the
+original. An item with no picture renders exactly as before: no placeholder.
+
+If a profile's file would still exceed 5 MB with photos in it
+(`stock_max_attachment_bytes`), it is regenerated without them and a warning is
+logged — the dealer gets a usable file rather than a bounced mail.
 
 > Upgrading from the pre-profile version: your existing recipients, exclusions
 > and threshold were migrated into a profile called **Default** on first start,

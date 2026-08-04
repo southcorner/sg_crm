@@ -74,6 +74,9 @@ const EDITABLE = {
   stock_report_enabled: z.coerce.boolean(),
   stock_report_time: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, 'send time must look like HH:MM'),
   stock_report_sync_first: z.coerce.boolean(),
+  // which categories get item photos, and how many to fetch per sync pass
+  stock_image_categories: z.array(z.string().trim().max(120)).max(100),
+  stock_image_batch: z.coerce.number().int().min(0).max(2000),
 };
 
 /** Written but never returned. */

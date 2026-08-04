@@ -144,6 +144,12 @@ const SETTING_DEFAULTS = {
   stock_report_enabled: false,
   stock_report_time: '08:30',
   stock_report_sync_first: true,
+  // Item photos are fetched one API call each, so only the categories where a
+  // picture actually helps a dealer choose. A racket is identified by its model
+  // name; a jersey or a shoe is not.
+  stock_image_categories: ['Badminton Jersey', 'Cycling Jersey', 'Shoes', 'String', 'Grip'],
+  // How many thumbnails one post-sync pass may fetch (0 disables the queue).
+  stock_image_batch: 100,
 };
 
 function db() {

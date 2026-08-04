@@ -94,6 +94,14 @@ function clampThreshold(value) {
   return Math.min(n, MAX_THRESHOLD);
 }
 
+/** Attachments beyond this lose their images rather than the send. */
+const DEFAULT_MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+
+function maxAttachmentBytes() {
+  const n = Math.trunc(Number(config.getSetting('stock_max_attachment_bytes', DEFAULT_MAX_ATTACHMENT_BYTES)));
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_MAX_ATTACHMENT_BYTES;
+}
+
 function rowToProfile(row) {
   if (!row) return null;
   return {
@@ -103,6 +111,7 @@ function rowToProfile(row) {
     excludedBrands: parseJsonArray(row.excluded_brands_json).map(Number).filter((n) => Number.isFinite(n)),
     excludedCategories: parseJsonArray(row.excluded_categories_json).map(String),
     threshold: clampThreshold(row.threshold),
+    includeImages: row.include_images === undefined || row.include_images === null ? true : Boolean(row.include_images),
     enabled: Boolean(row.enabled),
     sortOrder: Number(row.sort_order || 0),
     note: row.note || null,
@@ -138,8 +147,8 @@ function createProfile(input, { db = getDb() } = {}) {
   const info = db
     .prepare(
       `INSERT INTO stock_report_profiles
-         (name, recipients_json, excluded_brands_json, excluded_categories_json, threshold, enabled, sort_order, note)
-       VALUES (@name, @recipients, @brands, @cats, @threshold, @enabled, @sort_order, @note)`
+         (name, recipients_json, excluded_brands_json, excluded_categories_json, threshold, enabled, include_images, sort_order, note)
+       VALUES (@name, @recipients, @brands, @cats, @threshold, @enabled, @include_images, @sort_order, @note)`
     )
     .run({
       name,
@@ -148,6 +157,7 @@ function createProfile(input, { db = getDb() } = {}) {
       cats: JSON.stringify(parseJsonArray(input.excludedCategories).map(String)),
       threshold: clampThreshold(input.threshold ?? DEFAULT_THRESHOLD),
       enabled: input.enabled === undefined ? 1 : input.enabled ? 1 : 0,
+      include_images: input.includeImages === undefined ? 1 : input.includeImages ? 1 : 0,
       sort_order: Number.isFinite(Number(input.sortOrder)) ? Number(input.sortOrder) : nextSortOrder({ db }),
       note: input.note ? String(input.note) : null,
     });
@@ -170,6 +180,7 @@ function updateProfile(id, patch, { db = getDb() } = {}) {
     excludedCategories: patch.excludedCategories !== undefined ? parseJsonArray(patch.excludedCategories).map(String) : existing.excludedCategories,
     threshold: patch.threshold !== undefined ? clampThreshold(patch.threshold) : existing.threshold,
     enabled: patch.enabled !== undefined ? (patch.enabled ? 1 : 0) : existing.enabled ? 1 : 0,
+    includeImages: patch.includeImages !== undefined ? (patch.includeImages ? 1 : 0) : existing.includeImages ? 1 : 0,
     sortOrder: patch.sortOrder !== undefined ? Number(patch.sortOrder) : existing.sortOrder,
     note: patch.note !== undefined ? (patch.note ? String(patch.note) : null) : existing.note,
   };
@@ -179,7 +190,8 @@ function updateProfile(id, patch, { db = getDb() } = {}) {
     `UPDATE stock_report_profiles
         SET name = @name, recipients_json = @recipients, excluded_brands_json = @brands,
             excluded_categories_json = @cats, threshold = @threshold, enabled = @enabled,
-            sort_order = @sort_order, note = @note, updated_at = datetime('now')
+            include_images = @include_images, sort_order = @sort_order, note = @note,
+            updated_at = datetime('now')
       WHERE id = @id`
   ).run({
     id: Number(id),
@@ -189,6 +201,7 @@ function updateProfile(id, patch, { db = getDb() } = {}) {
     cats: JSON.stringify(next.excludedCategories),
     threshold: next.threshold,
     enabled: next.enabled,
+    include_images: next.includeImages,
     sort_order: next.sortOrder,
     note: next.note,
   });
@@ -267,7 +280,36 @@ function compose({ profile, date, now = new Date(), syncNote = null, db = getDb(
 
   const tree = stock.buildStock({ excludedBrands, excludedCategories, db });
   const sync = itemsSyncState({ db });
-  const file = stockHtml.generate({ excludedBrands, excludedCategories, threshold, date: runDate, db });
+  // Photos make the file far more useful and far bigger. Generate with them,
+  // then check: an attachment past MAX_ATTACHMENT_BYTES gets bounced by some
+  // mail servers and is miserable on a phone, so it is regenerated without
+  // images rather than sent broken or not at all.
+  const wantsImages = profile ? profile.includeImages !== false : true;
+  let file = stockHtml.generate({
+    excludedBrands,
+    excludedCategories,
+    threshold,
+    date: runDate,
+    includeImages: wantsImages,
+    db,
+  });
+  let imagesDropped = null;
+  const size = Buffer.byteLength(file.html, 'utf8');
+  if (wantsImages && size > maxAttachmentBytes()) {
+    logger.warn(
+      { profile: profile && profile.name, bytes: size, cap: maxAttachmentBytes() },
+      'stock file too large with images — regenerating without them'
+    );
+    file = stockHtml.generate({
+      excludedBrands,
+      excludedCategories,
+      threshold,
+      date: runDate,
+      includeImages: false,
+      db,
+    });
+    imagesDropped = { reason: 'size', bytesWithImages: size, cap: maxAttachmentBytes() };
+  }
 
   const subject = `Stock availability — ${runDate}`;
 
@@ -351,13 +393,21 @@ function compose({ profile, date, now = new Date(), syncNote = null, db = getDb(
       content: file.html,
       contentType: 'text/html; charset=utf-8',
     },
-    counts: { ...tree.counts, fileBytes: Buffer.byteLength(file.html, 'utf8') },
+    counts: { ...tree.counts, fileBytes: Buffer.byteLength(file.html, 'utf8'), images: file.images },
+    includeImages: wantsImages && !imagesDropped,
+    imagesDropped,
     threshold,
     recipients: (profile && profile.recipients) || [],
     excluded: tree.excluded,
     sync,
     syncNote,
-    file: { filename: file.filename, brands: file.brands, categories: file.categories, rows: file.counts.rows },
+    file: {
+      filename: file.filename,
+      brands: file.brands,
+      categories: file.categories,
+      rows: file.counts.rows,
+      images: file.images,
+    },
     brands: tree.brands.map((b) => ({
       id: b.id,
       name: b.name,
@@ -660,6 +710,8 @@ module.exports = {
   MASK_LABEL,
   parseJsonArray,
   clampThreshold,
+  DEFAULT_MAX_ATTACHMENT_BYTES,
+  maxAttachmentBytes,
   reportTime,
   reportSettings,
   listProfiles,

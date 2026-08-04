@@ -49,11 +49,18 @@ const brandIdList = listParam.refine((v) => v === undefined || v.every((s) => /^
   message: 'brands must be numeric brand ids',
 });
 
+/** ?images=0 / false / no — anything else (including absent) means "yes". */
+const imagesParam = z
+  .union([z.string(), z.boolean()])
+  .optional()
+  .transform((v) => (v === undefined ? true : !['0', 'false', 'no', 'off', false].includes(typeof v === 'string' ? v.toLowerCase() : v)));
+
 const fileQuerySchema = z.object({
   date: DATE.optional(),
   threshold: THRESHOLD.default(stockReport.DEFAULT_THRESHOLD),
   brands: brandIdList,
   categories: listParam,
+  images: imagesParam,
   title: z.string().trim().max(120).optional(),
 });
 
@@ -63,6 +70,7 @@ const profileBodySchema = z.object({
   excludedBrands: z.array(z.coerce.number().int().min(0)).max(500).default([]),
   excludedCategories: z.array(z.string().trim().max(120)).max(500).default([]),
   threshold: THRESHOLD.default(stockReport.DEFAULT_THRESHOLD),
+  includeImages: z.coerce.boolean().default(true),
   enabled: z.coerce.boolean().default(true),
   note: z.string().trim().max(500).nullish(),
 });
@@ -80,6 +88,7 @@ function options() {
     defaultThreshold: stockReport.DEFAULT_THRESHOLD,
     smtp: email.status(),
     sync: stockReport.itemsSyncState({}),
+    images: require('../services/item-images').imageProgress({}),
   };
 }
 
@@ -135,6 +144,7 @@ router.get(
       excludedBrands: (q.brands || []).map(Number),
       excludedCategories: q.categories || [],
       threshold: q.threshold,
+      includeImages: q.images,
       ...(q.date ? { date: q.date } : {}),
       ...(q.title ? { title: q.title } : {}),
     });
@@ -156,6 +166,7 @@ router.get(
         name: 'Ad-hoc preview',
         recipients: [],
         threshold: q.threshold,
+        includeImages: q.images,
         excludedBrands: (q.brands || []).map(Number),
         excludedCategories: q.categories || [],
       },
@@ -244,6 +255,7 @@ router.get(
       excludedBrands: profile.excludedBrands,
       excludedCategories: profile.excludedCategories,
       threshold: profile.threshold,
+      includeImages: profile.includeImages,
       ...(parsed.data.date ? { date: parsed.data.date } : {}),
     });
     return sendHtmlFile(res, file);

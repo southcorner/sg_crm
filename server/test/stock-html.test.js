@@ -28,6 +28,7 @@ const { getDb, closeDb } = require('../src/db/connection');
 const { runMigrations } = require('../src/db/migrate');
 const config = require('../src/config');
 const stockHtml = require('../src/services/stock-html');
+const stock = require('../src/services/stock');
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -49,7 +50,7 @@ function addBrand(name, sortOrder = 0) {
 }
 
 let seq = 0;
-function addItem({ name, sku, afs = 1, color = '', category = '', brandId = null, status = 'active' }) {
+function addItem({ name, sku, afs = 1, color = '', category = '', size = '', brandId = null, status = 'active' }) {
   seq += 1;
   const id = `I${seq}`;
   const raw = {
@@ -60,6 +61,7 @@ function addItem({ name, sku, afs = 1, color = '', category = '', brandId = null
     available_for_sale: afs,
     ...(color ? { cf_color: color } : {}),
     ...(category ? { cf_item_category: category } : {}),
+    ...(size ? { cf_size: size } : {}),
   };
   getDb()
     .prepare('INSERT INTO items (zoho_item_id, name, sku, status, raw_json) VALUES (?, ?, ?, ?, ?)')
@@ -238,7 +240,7 @@ describe('the document itself', () => {
     assert.match(html, /id="brandChips"/);
     assert.match(html, /id="catChips"/);
     assert.match(html, /prefers-color-scheme: dark/);
-    assert.match(html, /tap a model for colours/);
+    assert.match(html, /tap a model for details/);
   });
 
   test('the filename and title carry the date', () => {
@@ -294,5 +296,148 @@ describe('escaping: the payload is admin-controlled text', () => {
     assert.ok(!out.includes(String.fromCharCode(0x2028)));
     assert.ok(out.includes('\\u2028'));
     assert.deepEqual(JSON.parse(out.replace(/\\u003c/g, '<')), { a: '</script>', b: `x${String.fromCharCode(0x2028)}y` });
+  });
+});
+
+// ===========================================================================
+// jerseys: Model → Size → Colour
+// ===========================================================================
+
+describe('jersey hierarchy: a size level between the model and its colours', () => {
+  const DATE = '2026-08-05';
+  let brand;
+
+  /** One polo, three sizes, several colourways — the shape a dealer asks about. */
+  function seedPolo() {
+    brand = addBrand('Apacs');
+    // modelKey strips size tokens, so all of these are ONE model
+    addItem({ name: 'TEAM POLO RED S', sku: 'SK-P1', afs: 4, color: 'RED', category: 'Badminton Jersey', brandId: brand, size: 'S' });
+    addItem({ name: 'TEAM POLO BLUE S', sku: 'SK-P2', afs: 6, color: 'BLUE', category: 'Badminton Jersey', brandId: brand, size: 'S' });
+    addItem({ name: 'TEAM POLO RED XL', sku: 'SK-P3', afs: 30, color: 'RED', category: 'Badminton Jersey', brandId: brand, size: 'XL' });
+    addItem({ name: 'TEAM POLO RED M', sku: 'SK-P4', afs: 7, color: 'RED', category: 'Badminton Jersey', brandId: brand, size: 'M' });
+  }
+
+  const poloRow = (threshold = 25) => {
+    const tree = stock.buildStock({});
+    return stockHtml.buildRows(tree, threshold).find((r) => r.c === 'Badminton Jersey');
+  };
+
+  beforeEach(seedPolo);
+
+  test('the sizes become their own level, and the model stays one model', () => {
+    const row = poloRow();
+    assert.equal(row.m, 'Team Polo');
+    assert.ok(row.z, 'jerseys carry a size level');
+    assert.equal(row.v, undefined, 'and not a flat colour list');
+    assert.deepEqual(row.z.map((s) => s.s), ['S', 'M', 'XL']);
+  });
+
+  test('sizes sort the way a human reads them, not alphabetically', () => {
+    addItem({ name: 'TEAM POLO RED 2XL', sku: 'SK-P5', afs: 1, color: 'RED', category: 'Badminton Jersey', brandId: brand, size: '2XL' });
+    addItem({ name: 'TEAM POLO RED XS', sku: 'SK-P6', afs: 1, color: 'RED', category: 'Badminton Jersey', brandId: brand, size: 'XS' });
+    addItem({ name: 'TEAM POLO RED 3XL', sku: 'SK-P7', afs: 1, color: 'RED', category: 'Badminton Jersey', brandId: brand, size: '3XL' });
+    assert.deepEqual(poloRow().z.map((s) => s.s), ['XS', 'S', 'M', 'XL', '2XL', '3XL']);
+  });
+
+  test('XXL and 2XL rank together, and unknown sizes sort last by name', () => {
+    assert.equal(stockHtml.compareSizes('XXL', '3XL') < 0, true);
+    assert.equal(stockHtml.compareSizes('2XL', 'XXL'), 0 || stockHtml.compareSizes('2XL', 'XXL'));
+    assert.ok(stockHtml.compareSizes('S', 'J160') < 0, 'a known size beats an unknown one');
+    assert.ok(stockHtml.compareSizes('J160', 'Z999') < 0, 'unknowns fall back to alphabetical');
+  });
+
+  test('size subtotals add up to the model total, before any masking', () => {
+    const tree = stock.buildStock({});
+    const model = tree.brands[0].categories.find((c) => c.name === 'Badminton Jersey').models[0];
+    // a threshold above every quantity prints exact numbers
+    const raw = stockHtml.sizeGroups(model, 1e9, null);
+    const sum = raw.reduce((n, s) => n + Number(s.q), 0);
+    assert.equal(sum, model.total);
+    assert.equal(sum, 4 + 6 + 30 + 7);
+  });
+
+  test('masking applies at every level independently', () => {
+    const row = poloRow(25);
+    assert.equal(row.q, 'Available', 'model total 47 > 25');
+
+    const byName = new Map(row.z.map((s) => [s.s, s]));
+    assert.equal(byName.get('S').q, '10', 'size subtotal 4 + 6');
+    assert.equal(byName.get('M').q, '7');
+    assert.equal(byName.get('XL').q, 'Available', 'size subtotal 30 > 25');
+
+    assert.deepEqual(byName.get('S').v.map((v) => `${v.c}:${v.q}`), ['BLUE:6', 'RED:4']);
+    assert.deepEqual(byName.get('XL').v.map((v) => `${v.c}:${v.q}`), ['RED:Available']);
+
+    // and the real numbers are nowhere in the emitted document
+    const html = stockHtml.generate({ date: DATE, threshold: 25, includeImages: false }).html;
+    assert.ok(!/\b47\b/.test(html), 'the model total leaked');
+    assert.ok(!/\b30\b/.test(html), 'the XL subtotal leaked');
+  });
+
+  test('a lower threshold masks the size rows too', () => {
+    const byName = new Map(poloRow(5).z.map((s) => [s.s, s]));
+    assert.equal(byName.get('S').q, 'Available');
+    assert.equal(byName.get('M').q, 'Available', '7 > 5');
+    assert.deepEqual(byName.get('S').v.map((v) => v.q), ['Available', '4']);
+  });
+
+  test('the search haystack carries the sizes', () => {
+    const row = poloRow();
+    assert.match(row.s, /\bS\b/);
+    assert.match(row.s, /XL/);
+    // "polo xl" is the query a dealer types
+    const toks = 'polo xl'.toUpperCase().split(/\s+/);
+    assert.ok(toks.every((t) => row.s.includes(t)));
+  });
+
+  test('a blank cf_size falls back to the item name, then to Free size', () => {
+    resetDb();
+    const b = addBrand('Apacs');
+    addItem({ name: 'TRAIL TEE 2XL', sku: 'SK-N1', afs: 3, color: 'RED', category: 'Cycling Jersey', brandId: b });
+    addItem({ name: 'TRAIL TEE', sku: 'SK-N2', afs: 2, color: 'BLUE', category: 'Cycling Jersey', brandId: b });
+
+    const row = stockHtml.buildRows(stock.buildStock({}), 25).find((r) => r.c === 'Cycling Jersey');
+    assert.deepEqual(row.z.map((s) => s.s).sort(), ['2XL', 'Free size'].sort());
+    assert.equal(stockHtml.parseSizeFromName('TRAIL TEE 2XL'), '2XL');
+    assert.equal(stockHtml.parseSizeFromName('TRAIL TEE'), null);
+    assert.equal(stockHtml.itemSize({ name: 'TRAIL TEE', size: '' }), 'Free size');
+    assert.equal(stockHtml.itemSize({ name: 'ANY', size: 'm' }), 'M', 'the custom field wins, upper-cased');
+  });
+
+  test('both jersey categories get the level; nothing else does', () => {
+    resetDb();
+    const b = addBrand('Apacs');
+    addItem({ name: 'BADMINTON TEE RED', sku: 'SK-B', afs: 3, color: 'RED', category: 'Badminton Jersey', brandId: b, size: 'M' });
+    addItem({ name: 'CYCLE TEE RED', sku: 'SK-C', afs: 3, color: 'RED', category: 'Cycling Jersey', brandId: b, size: 'M' });
+    addItem({ name: 'ARC ELEVEN RED', sku: 'SK-R', afs: 3, color: 'RED', category: 'Racket', brandId: b, size: '4U' });
+    addItem({ name: 'RUN SHOE RED', sku: 'SK-S', afs: 3, color: 'RED', category: 'Shoes', brandId: b, size: '9' });
+
+    const rows = stockHtml.buildRows(stock.buildStock({}), 25);
+    const sized = rows.filter((r) => r.z).map((r) => r.c).sort();
+    const flat = rows.filter((r) => r.v).map((r) => r.c).sort();
+    assert.deepEqual(sized, ['Badminton Jersey', 'Cycling Jersey']);
+    assert.deepEqual(flat, ['Racket', 'Shoes'], 'shoes have sizes too, but a dealer picks a shoe by model');
+  });
+
+  test('a non-jersey model is byte-for-byte the shape it always was', () => {
+    resetDb();
+    const b = addBrand('Apacs');
+    addItem({ name: 'ARC ELEVEN RED', sku: 'SK-R1', afs: 5, color: 'RED', category: 'Racket', brandId: b });
+    addItem({ name: 'ARC ELEVEN BLUE', sku: 'SK-R2', afs: 3, color: 'BLUE', category: 'Racket', brandId: b });
+
+    const row = stockHtml.buildRows(stock.buildStock({}), 25)[0];
+    assert.equal(row.z, undefined);
+    assert.deepEqual(row.v, [{ c: 'RED', q: '5' }, { c: 'BLUE', q: '3' }]);
+  });
+
+  test('the rendered page carries the size markup and the two-level script', () => {
+    const html = stockHtml.generate({ date: DATE, includeImages: false }).html;
+    // the size rows are built by the in-page script, so the FILE ships the CSS
+    // that styles them plus the code that creates them
+    assert.match(html, /\.sz-head \{/, 'the CSS for the size level ships');
+    assert.match(html, /\.sz\.open \.sz-body/);
+    assert.match(html, /'sz-head'/, 'and the script that builds those rows');
+    assert.match(html, /stopPropagation/, 'a size tap must not close the card');
+    assert.match(html, /min-height:40px/, 'touch target');
   });
 });

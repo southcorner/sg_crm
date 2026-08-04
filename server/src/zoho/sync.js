@@ -868,6 +868,22 @@ async function _runSync({ entities, client, lineItemLimit } = {}) {
 
   results.customersRecomputed = recomputeCustomerInvoiceDates();
   results.brandsRemapped = remapBrands();
+
+  // Fresh item payloads may carry new `image_document_id`s, so this is the
+  // natural moment to top the thumbnail cache up. It is budget-capped and
+  // resumable, so a partial pass here is normal, not a failure — and a broken
+  // image queue must never fail the sync that fed it.
+  if (!results.halted && listEntities.includes('items')) {
+    try {
+      const itemImages = require('../services/item-images');
+      const batch = Math.max(0, Math.trunc(Number(config.getSetting('stock_image_batch', 100))) || 0);
+      if (batch > 0) results.itemImages = await itemImages.syncItemImages({ client: api, limit: batch });
+    } catch (err) {
+      results.errors.push({ entity: 'item_images', error: err.message });
+      logger.error({ err: err.message }, 'item image pass failed');
+    }
+  }
+
   results.finishedAt = new Date().toISOString();
   results.ok = results.errors.length === 0;
   return results;

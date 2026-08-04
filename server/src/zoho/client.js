@@ -197,9 +197,16 @@ class ZohoClient {
 
   /**
    * One API call, with budget check, rate limiting, 401-refresh and retries.
-   * Returns the parsed JSON body.
+   * Returns the parsed JSON body — or, with `responseType: 'binary'`, a
+   * `{buffer, contentType}` pair (item images are the only such endpoint).
+   *
+   * Binary responses take a separate read path because the JSON one consumes
+   * the body as text, which would corrupt a JPEG. Everything else — budget,
+   * rate limit, 401 refresh, retry/backoff — is shared, so an image fetch is
+   * counted and throttled exactly like any other call. An error status still
+   * decodes as text so Zoho's JSON error message survives.
    */
-  async request(path, { method = 'GET', query = {}, body, headers = {} } = {}) {
+  async request(path, { method = 'GET', query = {}, body, headers = {}, responseType = 'json' } = {}) {
     let refreshed = false;
     let attempt = 0;
 
@@ -234,7 +241,18 @@ class ZohoClient {
       }
 
       const status = res.status;
-      const text = typeof res.text === 'function' ? await res.text() : '';
+      const wantsBinary = responseType === 'binary';
+      const ok = status >= 200 && status < 300;
+
+      let buffer = null;
+      let text = '';
+      if (wantsBinary && ok) {
+        buffer = Buffer.from(await res.arrayBuffer());
+      } else {
+        // errors always come back as JSON, whatever we asked for
+        text = typeof res.text === 'function' ? await res.text() : '';
+      }
+
       let payload = null;
       if (text) {
         try {
@@ -271,12 +289,23 @@ class ZohoClient {
         });
       }
 
+      if (wantsBinary) {
+        const contentType =
+          res.headers && typeof res.headers.get === 'function' ? res.headers.get('Content-Type') : null;
+        return { buffer: buffer || Buffer.alloc(0), contentType: contentType || null };
+      }
+
       return payload || {};
     }
   }
 
   get(path, query) {
     return this.request(path, { method: 'GET', query });
+  }
+
+  /** GET returning raw bytes: `{buffer, contentType}`. */
+  getBinary(path, query) {
+    return this.request(path, { method: 'GET', query, responseType: 'binary' });
   }
 
   /**
