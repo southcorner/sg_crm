@@ -14,6 +14,10 @@ const RULE_LABEL = {
   stock_report: 'Stock report',
 };
 
+/** The four content rules a run can be narrowed to (fallback ordering). */
+const RULE_KEYS = ['overdue', 'cheque', 'dormant', 'focus'];
+const RULE_CHIP = { overdue: '⚠ Overdue', cheque: '🏦 Cheques', dormant: '😴 Dormant', focus: '🎯 Focus' };
+
 const STATUS_TONE = {
   sent: 'ok',
   failed: 'bad',
@@ -39,6 +43,8 @@ export default function Reminders() {
   const [page, setPage] = useState(1);
   const [preview, setPreview] = useState(null);
   const [confirming, setConfirming] = useState(false);
+  // null = "not touched yet", which reads as the automatic-rule settings below
+  const [ruleDraft, setRuleDraft] = useState(null);
 
   const statusQuery = useQuery({ queryKey: ['reminders-status'], queryFn: () => api.get('/reminders/status') });
 
@@ -48,13 +54,26 @@ export default function Reminders() {
     placeholderData: (prev) => prev,
   });
 
+  const ruleKeys = statusQuery.data?.ruleKeys || RULE_KEYS;
+  // untouched → whatever is set to go out automatically; a rule the admin has
+  // paused starts unticked, which is exactly what "run the usual thing" means
+  const selectedRules = ruleDraft ?? statusQuery.data?.automaticRules ?? ruleKeys;
+  const orderedRules = ruleKeys.filter((k) => selectedRules.includes(k));
+  // updater form on purpose: two toggles inside one React batch must not both
+  // start from the same stale list, or the second silently undoes the first
+  const toggleRule = (key) =>
+    setRuleDraft((current) => {
+      const base = current ?? statusQuery.data?.automaticRules ?? ruleKeys;
+      return base.includes(key) ? base.filter((k) => k !== key) : [...base, key];
+    });
+
   const dryRun = useMutation({
-    mutationFn: () => api.post('/reminders/run', { date, dry_run: true }),
+    mutationFn: () => api.post('/reminders/run', { date, dry_run: true, rules: orderedRules }),
     onSuccess: (res) => setPreview(res),
   });
 
   const sendNow = useMutation({
-    mutationFn: () => api.post('/reminders/run', { date }),
+    mutationFn: () => api.post('/reminders/run', { date, rules: orderedRules }),
     onSuccess: (res) => {
       setConfirming(false);
       setPreview(res);
@@ -69,6 +88,7 @@ export default function Reminders() {
   const smtp = statusQuery.data?.smtp;
   const cron = statusQuery.data?.cron;
   const whatsapp = statusQuery.data?.whatsapp;
+  const automaticRules = statusQuery.data?.automaticRules;
   const isToday = date === todayIso();
 
   return (
@@ -136,12 +156,49 @@ export default function Reminders() {
           options={(log?.ruleTypes || []).map((r) => ({ value: r, label: RULE_LABEL[r] || titleCase(r) }))}
         />
         <div className="spacer" />
-        <button type="button" className="btn ghost" onClick={() => dryRun.mutate()} disabled={dryRun.isPending}>
+        <button
+          type="button"
+          className="btn ghost"
+          onClick={() => dryRun.mutate()}
+          disabled={dryRun.isPending || !orderedRules.length}
+        >
           {dryRun.isPending ? 'Composing…' : `Preview ${isToday ? "today's" : "that day's"} digests`}
         </button>
-        <button type="button" className="btn" onClick={() => setConfirming(true)} disabled={sendNow.isPending}>
+        <button
+          type="button"
+          className="btn"
+          onClick={() => setConfirming(true)}
+          disabled={sendNow.isPending || !orderedRules.length}
+        >
           {sendNow.isPending ? 'Sending…' : 'Send now'}
         </button>
+      </div>
+
+      <div className="rule-bar">
+        <span className="rule-bar-label">Include</span>
+        <div className="chip-row">
+          {ruleKeys.map((key) => {
+            const on = selectedRules.includes(key);
+            const paused = automaticRules && !automaticRules.includes(key);
+            return (
+              <button
+                key={key}
+                type="button"
+                className={`chip-toggle ${on ? 'on' : ''}`}
+                onClick={() => toggleRule(key)}
+                title={paused ? 'Set to manual only in Settings → Reminders' : 'Sent automatically'}
+              >
+                {RULE_CHIP[key] || titleCase(key)}
+                {paused ? <span className="chip-count">manual</span> : null}
+              </button>
+            );
+          })}
+        </div>
+        {!orderedRules.length ? (
+          <span className="form-error">Pick at least one rule.</span>
+        ) : (
+          <span className="muted-text">Applies to both Preview and Send now.</span>
+        )}
       </div>
 
       <ErrorBox error={logQuery.error || dryRun.error || sendNow.error} />
@@ -149,9 +206,11 @@ export default function Reminders() {
       {confirming ? (
         <Card title="Send the digests now?">
           <p className="muted-text">
-            This runs the {date} digest immediately and emails every rep who has something outstanding.{' '}
-            <strong>Dedupe still applies:</strong> reps who already got their digest for {date} are skipped, and items
-            inside their resend window stay out. Nobody is mailed twice.
+            This runs the {date} digest immediately and emails every rep who has something outstanding under{' '}
+            <strong>{orderedRules.map((k) => RULE_CHIP[k] || titleCase(k)).join(', ')}</strong>
+            {orderedRules.length < ruleKeys.length ? ' (the other sections are left out)' : ''}.{' '}
+            <strong>Dedupe still applies:</strong> a rep who already had exactly this set of sections for {date} is
+            skipped, and items inside their resend window stay out either way. Nobody is mailed twice.
           </p>
           <div className="form-row">
             <button type="button" className="btn" onClick={() => sendNow.mutate()} disabled={sendNow.isPending}>

@@ -100,9 +100,20 @@ function register(name, expr, handler) {
 
 async function runDigestJob() {
   const engine = require('../services/reminders/engine');
-  const result = await engine.run({});
+
+  // Only the rules the admin left switched on go out automatically. All four
+  // off means the scheduled digest does nothing at all — and records nothing,
+  // because nothing was attempted.
+  const rules = engine.automaticRules();
+  if (!rules.length) {
+    logger.info('digest job skipped — every rule is set to manual only');
+    return { skipped: true, reason: 'no automatic rules enabled', rules: [] };
+  }
+
+  const result = await engine.run({ rules });
   const summary = {
     runDate: result.runDate,
+    rules,
     digests: result.digests.length,
     sent: result.results.filter((r) => r.status === 'sent').length,
     failed: result.results.filter((r) => r.status === 'failed').length,

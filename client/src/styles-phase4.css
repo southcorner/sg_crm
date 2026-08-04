@@ -370,3 +370,42 @@ a.btn {
   text-decoration: none;
   line-height: 1.35;
 }
+
+/* ---- reminders: which rules a manual run includes ---- */
+.rule-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: -4px 0 12px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.rule-bar-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.rule-bar .chip-row {
+  margin: 0;
+}
+
+/* settings: the four automatic-rule toggles */
+.rule-toggle {
+  align-items: flex-start !important;
+  padding-top: 0 !important;
+}
+
+.rule-toggle > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13.5px;
+  color: var(--ink);
+}

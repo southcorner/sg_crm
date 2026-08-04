@@ -1045,6 +1045,38 @@ function WhatsAppTab() {
  * cached transport server-side and saving the send time re-registers the cron
  * job, so nothing here needs a restart.
  */
+/**
+ * The four digest sections, and what switching one off actually means. These
+ * gate the SCHEDULED digest only — a manual run from the Reminders page can
+ * always fire any of them.
+ */
+const AUTO_RULES = [
+  {
+    key: 'rule_overdue_enabled',
+    label: '⚠ Overdue invoices',
+    on: 'Sent automatically with the daily digest.',
+    off: 'Never sent automatically; still available from the Reminders page.',
+  },
+  {
+    key: 'rule_cheque_enabled',
+    label: '🏦 Cheques due',
+    on: 'Sent automatically with the daily digest.',
+    off: 'Never sent automatically; still available from the Reminders page.',
+  },
+  {
+    key: 'rule_dormant_enabled',
+    label: '😴 Dormant customers',
+    on: 'Sent automatically with the daily digest.',
+    off: 'Never sent automatically; still available from the Reminders page.',
+  },
+  {
+    key: 'rule_focus_enabled',
+    label: '🎯 Focus plan',
+    on: 'Sent automatically with the daily digest.',
+    off: 'Never sent automatically; still available from the Reminders page.',
+  },
+];
+
 function RemindersTab() {
   const queryClient = useQueryClient();
   const { data, isLoading, error } = useQuery({ queryKey: ['settings'], queryFn: () => api.get('/settings') });
@@ -1173,6 +1205,43 @@ function RemindersTab() {
               {save.isPending ? 'Saving…' : 'Save'}
             </button>
             {save.isSuccess && !draft ? <span className="form-ok">Saved.</span> : null}
+          </div>
+        </form>
+      </Card>
+
+      <Card title="Automatic rules">
+        <p className="muted-text">
+          Which sections the <strong>scheduled</strong> digest is allowed to send. Switching one off pauses the
+          nagging without losing the rule — it stays available by hand from the{' '}
+          <Link className="link" to="/reminders">Reminders</Link> page.
+        </p>
+        <form
+          className="stack-form wide"
+          onSubmit={(e) => {
+            e.preventDefault();
+            save.mutate(Object.fromEntries(AUTO_RULES.map((r) => [r.key, checked(r.key)])));
+          }}
+        >
+          <div className="settings-grid">
+            {AUTO_RULES.map((rule) => (
+              <label key={rule.key} className="checkbox-field rule-toggle">
+                <input type="checkbox" checked={checked(rule.key)} onChange={(e) => set(rule.key, e.target.checked)} />
+                <span>
+                  {rule.label}
+                  <span className="hint">{checked(rule.key) ? rule.on : rule.off}</span>
+                </span>
+              </label>
+            ))}
+          </div>
+          {AUTO_RULES.every((r) => !checked(r.key)) ? (
+            <Banner tone="warn">
+              Every rule is manual — the scheduled digest will not send anything at all.
+            </Banner>
+          ) : null}
+          <div className="form-row">
+            <button type="submit" className="btn" disabled={save.isPending || !draft}>
+              {save.isPending ? 'Saving…' : 'Save'}
+            </button>
           </div>
         </form>
       </Card>

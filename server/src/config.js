@@ -106,6 +106,13 @@ const SETTING_DEFAULTS = {
   overdue_min_days: 1,
   overdue_min_amount: 0,
   overdue_resend_days: 7,
+  // Which digest rules the SCHEDULED run may send. Switching one off stops it
+  // going out automatically; it stays available from the Reminders page, so
+  // this is "pause the nagging", not "delete the rule".
+  rule_overdue_enabled: true,
+  rule_cheque_enabled: true,
+  rule_dormant_enabled: true,
+  rule_focus_enabled: true,
   zoho_daily_call_budget: 2000,
   // Global rep visibility scope (services/attribution.js). null = every rep is
   // visible; an array of zoho_salesperson_ids narrows the whole CRM to them.

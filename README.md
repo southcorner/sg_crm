@@ -320,6 +320,21 @@ sales targets; Performance then shows achievement against them, month on month.
 - **Dormant after (months)** — default 3. Capped at ~10 customers per digest, each mentioned at most once a fortnight.
 - **Cheque reminder lead time** — default 3 days before the deposit date, fired once per cheque.
 
+**Automatic rules** — four switches, one per digest section (overdue, cheques,
+dormant, focus), all on by default. Switching one off stops it going out with
+the **scheduled** digest only: the rule still works and can be fired by hand
+from the Reminders page, where paused rules show a *manual* badge. This is how
+you say "stop chasing payments for now" without losing the setup. With all four
+off the scheduled digest does nothing at all and records nothing, because
+nothing was attempted.
+
+The once-a-day guard is keyed on *which sections went out*, not merely on the
+rep and the day — so a scheduled dormant+focus digest in the morning does not
+block a manual cheque+overdue run that afternoon, while re-running the same
+sections on the same day is still refused. Item-level dedupe (the resend window,
+one cheque per deposit date, one dormant mention a fortnight) applies to every
+run regardless.
+
 Then **Mail server (SMTP)**: host, port (587 STARTTLS / 465 implicit TLS),
 username, password (write-only — it is never sent back to the browser) and the
 From address. Save, then use **Send a test email**. Finally go to **Reminders →

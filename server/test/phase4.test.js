@@ -146,6 +146,8 @@ beforeEach(() => {
   config.setSetting('overdue_min_amount', 0);
   config.setSetting('overdue_resend_days', 7);
   config.setSetting('digest_send_time', '09:00');
+  // every rule is automatic by default; the per-rule tests narrow this
+  for (const key of engine.RULE_KEYS) config.setSetting(`rule_${key}_enabled`, true);
 });
 
 // ===========================================================================
@@ -716,5 +718,339 @@ describe('cron schedule', () => {
     assert.equal(cronJobs.isEnabled(), false);
     assert.deepEqual(cronJobs.start(), { enabled: false, started: false, jobs: [] });
     assert.equal(cronJobs.getStatus().started, false);
+  });
+});
+
+// ===========================================================================
+// per-rule automatic / manual control
+// ===========================================================================
+
+/**
+ * A rep with something to say under every one of the four rules, so a digest
+ * can be narrowed and the missing sections actually mean something.
+ * 2026-08-04 is a Tuesday: focus rides in on the first-of-month catch-up.
+ */
+function seedAllFourRules() {
+  addRep('SP1', 'Anil Mehta');
+
+  // overdue: due 2026-06-20, well past the 1-day cut-off
+  addCustomer('C1', 'Sharma Cycle Mart', { outstanding: 12000 });
+  addInvoice('I-1', { customer: 'C1', rep: 'SP1', date: '2026-06-01', due: '2026-06-20', balance: 12000, number: 'INV-1' });
+  // cheque: deposits exactly cheque_lead_days (3) out
+  addCheque({ customer: 'C1', rep: 'SP1', deposit: '2026-08-07', amount: 50000, number: '400001' });
+  // focus: an open plan for the month
+  addFocus({ month: '2026-08', customer: 'C1', rep: 'SP1', note: 'Reorder due' });
+  // dormant: last invoice in January, nothing owed (so it is not ALSO overdue)
+  addCustomer('C2', 'Frontier Sports', { outstanding: 0 });
+  addInvoice('I-2', { customer: 'C2', rep: 'SP1', date: '2026-01-05', balance: 0, status: 'paid', number: 'INV-2' });
+}
+
+const RULE_DATE = '2026-08-04';
+const sectionCounts = (digest) => ({
+  overdue: digest.sections.overdue.length,
+  cheques: digest.sections.cheques.length,
+  dormant: digest.sections.dormant.length,
+  focus: digest.sections.focus.length,
+});
+
+describe('rule selection: evaluate() only runs what it was asked for', () => {
+  beforeEach(seedAllFourRules);
+
+  test('by default all four rules contribute', () => {
+    const digest = engine.evaluate({ date: RULE_DATE }).digests[0];
+    assert.deepEqual(sectionCounts(digest), { overdue: 1, cheques: 1, dormant: 1, focus: 1 });
+  });
+
+  test('a narrowed run carries only those sections', () => {
+    const digest = engine.evaluate({ date: RULE_DATE, rules: ['dormant', 'focus'] }).digests[0];
+    assert.deepEqual(sectionCounts(digest), { overdue: 0, cheques: 0, dormant: 1, focus: 1 });
+    assert.match(digest.text, /FOCUS PLAN/);
+    assert.match(digest.text, /DORMANT/);
+    assert.ok(!digest.text.includes('OVERDUE'));
+    assert.ok(!digest.text.includes('CHEQUES DUE'));
+  });
+
+  test('the complementary selection carries exactly the other two', () => {
+    const digest = engine.evaluate({ date: RULE_DATE, rules: ['overdue', 'cheque'] }).digests[0];
+    assert.deepEqual(sectionCounts(digest), { overdue: 1, cheques: 1, dormant: 0, focus: 0 });
+    assert.match(digest.text, /OVERDUE/);
+    assert.match(digest.text, /CHEQUES DUE/);
+    assert.ok(!digest.text.includes('DORMANT'));
+  });
+
+  test('the selection is reported back, in digest order, with junk dropped', () => {
+    const evaluation = engine.evaluate({ date: RULE_DATE, rules: ['focus', 'nonsense', 'overdue'] });
+    assert.deepEqual(evaluation.rules, ['overdue', 'focus']);
+    assert.deepEqual(evaluation.stats.rules, ['overdue', 'focus']);
+    assert.equal(evaluation.rulesKey, 'focus,overdue');
+  });
+
+  test('a rep left with nothing after narrowing gets no digest at all', () => {
+    getDb().prepare('DELETE FROM cheques').run();
+    const evaluation = engine.evaluate({ date: RULE_DATE, rules: ['cheque'] });
+    assert.deepEqual(evaluation.digests, []);
+  });
+
+  test('narrowing writes nothing (evaluate stays pure)', () => {
+    const before = logCount();
+    engine.evaluate({ date: RULE_DATE, rules: ['overdue'] });
+    assert.equal(logCount(), before);
+  });
+});
+
+describe('rule selection: the scheduled digest respects the toggles', () => {
+  beforeEach(seedAllFourRules);
+
+  test('automaticRules() reads the four settings', () => {
+    assert.deepEqual(engine.automaticRules(), ['overdue', 'cheque', 'dormant', 'focus']);
+    config.setSetting('rule_overdue_enabled', false);
+    config.setSetting('rule_cheque_enabled', false);
+    assert.deepEqual(engine.automaticRules(), ['dormant', 'focus']);
+  });
+
+  test('a rule switched off is absent from the scheduled digest, the others still go', async () => {
+    config.setSetting('rule_overdue_enabled', false);
+    config.setSetting('rule_cheque_enabled', false);
+
+    const fake = fakeSender();
+    const result = await engine.run({ date: RULE_DATE, rules: engine.automaticRules(), senders: fake.senders });
+
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(sectionCounts(fake.sent[0]), { overdue: 0, cheques: 0, dormant: 1, focus: 1 });
+    assert.equal(result.results[0].status, 'sent');
+
+    // and only the rules that ran left item rows
+    const ruleTypes = getDb()
+      .prepare("SELECT DISTINCT rule_type FROM reminders_log WHERE rule_type <> 'digest' ORDER BY rule_type")
+      .all()
+      .map((r) => r.rule_type);
+    assert.deepEqual(ruleTypes, ['dormant', 'focus']);
+  });
+
+  test('every rule off then nothing sent and NOT a single log row', async () => {
+    for (const key of engine.RULE_KEYS) config.setSetting(`rule_${key}_enabled`, false);
+    assert.deepEqual(engine.automaticRules(), []);
+
+    const fake = fakeSender();
+    const result = await engine.run({ date: RULE_DATE, rules: engine.automaticRules(), senders: fake.senders });
+
+    assert.equal(fake.sent.length, 0);
+    assert.deepEqual(result.digests, []);
+    assert.deepEqual(result.results, []);
+    assert.equal(result.skipped, 'no rules selected');
+    assert.equal(logCount(), 0, 'nothing was attempted, so nothing is recorded');
+  });
+
+  test('the cron job itself skips cleanly when everything is manual', async () => {
+    for (const key of engine.RULE_KEYS) config.setSetting(`rule_${key}_enabled`, false);
+    const summary = await cronJobs.runDigestJob();
+    assert.equal(summary.skipped, true);
+    assert.match(summary.reason, /no automatic rules/);
+    assert.equal(logCount(), 0);
+  });
+
+  test('the toggles never constrain a manual run', async () => {
+    // overdue + cheque are manual-only...
+    config.setSetting('rule_overdue_enabled', false);
+    config.setSetting('rule_cheque_enabled', false);
+
+    // ...but asking for them by hand still works
+    const fake = fakeSender();
+    await engine.run({ date: RULE_DATE, rules: ['overdue', 'cheque'], senders: fake.senders });
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(sectionCounts(fake.sent[0]), { overdue: 1, cheques: 1, dormant: 0, focus: 0 });
+  });
+
+  test('a bare run() is still all four, whatever the toggles say', async () => {
+    for (const key of engine.RULE_KEYS) config.setSetting(`rule_${key}_enabled`, false);
+    const fake = fakeSender();
+    await engine.run({ date: RULE_DATE, senders: fake.senders });
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(sectionCounts(fake.sent[0]), { overdue: 1, cheques: 1, dormant: 1, focus: 1 });
+  });
+});
+
+describe('rule selection: the per-rep/day guard is keyed on the rule set', () => {
+  beforeEach(seedAllFourRules);
+
+  test('the morning dormant+focus digest does not block an afternoon cheque+overdue run', async () => {
+    const morning = fakeSender();
+    await engine.run({ date: RULE_DATE, rules: ['dormant', 'focus'], senders: morning.senders });
+    assert.equal(morning.sent.length, 1);
+
+    const afternoon = fakeSender();
+    const result = await engine.run({ date: RULE_DATE, rules: ['overdue', 'cheque'], senders: afternoon.senders });
+    assert.equal(afternoon.sent.length, 1, 'a different rule set is a different digest');
+    assert.equal(result.results[0].status, 'sent');
+    assert.deepEqual(sectionCounts(afternoon.sent[0]), { overdue: 1, cheques: 1, dormant: 0, focus: 0 });
+  });
+
+  test('and the other way round', async () => {
+    const first = fakeSender();
+    await engine.run({ date: RULE_DATE, rules: ['overdue', 'cheque'], senders: first.senders });
+    assert.equal(first.sent.length, 1);
+
+    const second = fakeSender();
+    await engine.run({ date: RULE_DATE, rules: ['dormant', 'focus'], senders: second.senders });
+    assert.equal(second.sent.length, 1);
+  });
+
+  test('re-running the SAME rule set the same day is still refused', async () => {
+    await engine.run({ date: RULE_DATE, rules: ['dormant', 'focus'], senders: fakeSender().senders });
+
+    // wipe the item rows so the rules would happily re-compose: only the
+    // digest guard stands between the rep and a duplicate
+    getDb().prepare("DELETE FROM reminders_log WHERE rule_type <> 'digest'").run();
+
+    const again = fakeSender();
+    const result = await engine.run({ date: RULE_DATE, rules: ['focus', 'dormant'], senders: again.senders });
+    assert.equal(again.sent.length, 0, 'order of the list must not matter');
+    assert.equal(result.results[0].status, 'skipped_dedupe');
+  });
+
+  test('the guard row records which rules it covers', async () => {
+    await engine.run({ date: RULE_DATE, rules: ['dormant', 'focus'], senders: fakeSender().senders });
+    const row = getDb().prepare("SELECT entity_type, entity_id, detail FROM reminders_log WHERE rule_type = 'digest'").get();
+    assert.equal(row.entity_type, 'rules');
+    assert.equal(row.entity_id, 'dormant,focus');
+    assert.deepEqual(JSON.parse(row.detail).rules, ['dormant', 'focus']);
+  });
+
+  test('a legacy digest row (no rule set recorded) still blocks an all-rules run', async () => {
+    // exactly what rows written before rule selection existed look like
+    logSent({ date: RULE_DATE, ruleType: 'digest', entityType: null, entityId: null, rep: 'SP1' });
+    const fake = fakeSender();
+    const result = await engine.run({ date: RULE_DATE, senders: fake.senders });
+    assert.equal(fake.sent.length, 0);
+    assert.equal(result.results[0].status, 'skipped_dedupe');
+  });
+
+  test('a legacy digest row does NOT block a narrowed run', async () => {
+    logSent({ date: RULE_DATE, ruleType: 'digest', entityType: null, entityId: null, rep: 'SP1' });
+    const fake = fakeSender();
+    await engine.run({ date: RULE_DATE, rules: ['cheque'], senders: fake.senders });
+    assert.equal(fake.sent.length, 1);
+  });
+
+  test('item-level dedupe still applies across differently-scoped runs', async () => {
+    await engine.run({ date: RULE_DATE, rules: ['overdue'], senders: fakeSender().senders });
+
+    // the invoice went out this morning; an all-rules run this afternoon must
+    // not chase it again, even though the digest guard lets the run through
+    const afternoon = fakeSender();
+    await engine.run({ date: RULE_DATE, senders: afternoon.senders });
+    assert.equal(afternoon.sent.length, 1);
+    assert.deepEqual(sectionCounts(afternoon.sent[0]), { overdue: 0, cheques: 1, dormant: 1, focus: 1 });
+  });
+
+  test('dry_run reports the dedupe verdict for the rule set it was asked about', async () => {
+    await engine.run({ date: RULE_DATE, rules: ['dormant', 'focus'], senders: fakeSender().senders });
+    getDb().prepare("DELETE FROM reminders_log WHERE rule_type <> 'digest'").run();
+
+    const same = await engine.run({ date: RULE_DATE, rules: ['dormant', 'focus'], dryRun: true });
+    assert.deepEqual(same.results.map((r) => r.wouldDedupe), [true]);
+
+    const other = await engine.run({ date: RULE_DATE, rules: ['overdue', 'cheque'], dryRun: true });
+    assert.deepEqual(other.results.map((r) => r.wouldDedupe), [false]);
+  });
+});
+
+describe('rule selection over HTTP', () => {
+  let server;
+  let origin;
+  let cookie = null;
+
+  before(async () => {
+    const adminUser = require('../src/services/adminUser');
+    getDb().prepare('DELETE FROM admin_user').run();
+    adminUser.ensureAdminUser();
+    const { createApp } = require('../src/index');
+    const app = createApp(getDb());
+    await new Promise((resolve) => {
+      server = app.listen(0, '127.0.0.1', resolve);
+    });
+    origin = `http://127.0.0.1:${server.address().port}`;
+
+    const res = await fetch(`${origin}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: 'admin123' }),
+    });
+    cookie = (res.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).join('; ');
+  });
+
+  after(async () => {
+    if (server) await new Promise((resolve) => server.close(resolve));
+  });
+
+  const call = (pathname, body) =>
+    fetch(origin + pathname, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: {
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+
+  test('an unknown rule name is a 400', async () => {
+    const res = await call('/api/reminders/run', { dry_run: true, rules: ['overdue', 'bananas'] });
+    assert.equal(res.status, 400);
+    const json = await res.json();
+    assert.equal(json.error, 'invalid request');
+  });
+
+  test('an empty rule list is a 400 rather than a silent no-op', async () => {
+    assert.equal((await call('/api/reminders/run', { dry_run: true, rules: [] })).status, 400);
+  });
+
+  test('a valid selection is honoured and echoed back', async () => {
+    seedAllFourRules();
+    const res = await call('/api/reminders/run', { date: RULE_DATE, dry_run: true, rules: ['cheque'] });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.deepEqual(json.rules, ['cheque']);
+    assert.equal(json.digests.length, 1);
+    assert.deepEqual(sectionCounts(json.digests[0]), { overdue: 0, cheques: 1, dormant: 0, focus: 0 });
+  });
+
+  test('omitting rules still means all four', async () => {
+    seedAllFourRules();
+    const res = await call('/api/reminders/run', { date: RULE_DATE, dry_run: true });
+    const json = await res.json();
+    assert.deepEqual(json.rules, ['overdue', 'cheque', 'dormant', 'focus']);
+    assert.deepEqual(sectionCounts(json.digests[0]), { overdue: 1, cheques: 1, dormant: 1, focus: 1 });
+  });
+
+  test('the preview accepts a comma list and rejects junk', async () => {
+    seedAllFourRules();
+    const ok = await call(`/api/reminders/preview?date=${RULE_DATE}&rules=dormant,focus`);
+    assert.equal(ok.status, 200);
+    const json = await ok.json();
+    assert.deepEqual(json.rules, ['dormant', 'focus']);
+    assert.deepEqual(sectionCounts(json.digests[0]), { overdue: 0, cheques: 0, dormant: 1, focus: 1 });
+
+    assert.equal((await call('/api/reminders/preview?rules=dormant,bananas')).status, 400);
+  });
+
+  test('the status route advertises the rule keys and which are automatic', async () => {
+    config.setSetting('rule_cheque_enabled', false);
+    const json = await (await call('/api/reminders/status')).json();
+    assert.deepEqual(json.ruleKeys, ['overdue', 'cheque', 'dormant', 'focus']);
+    assert.deepEqual(json.automaticRules, ['overdue', 'dormant', 'focus']);
+  });
+
+  test('the four toggles round-trip through /api/settings', async () => {
+    const res = await fetch(`${origin}/api/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Cookie: cookie },
+      body: JSON.stringify({ rule_overdue_enabled: false, rule_focus_enabled: false }),
+    });
+    assert.equal(res.status, 200);
+    const json = await res.json();
+    assert.equal(json.settings.rule_overdue_enabled, false);
+    assert.equal(json.settings.rule_cheque_enabled, true);
+    assert.equal(json.settings.rule_focus_enabled, false);
+    assert.deepEqual(engine.automaticRules(), ['cheque', 'dormant']);
   });
 });

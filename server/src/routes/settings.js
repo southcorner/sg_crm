@@ -54,6 +54,11 @@ const EDITABLE = {
   overdue_min_days: z.coerce.number().int().min(0).max(365),
   overdue_min_amount: z.coerce.number().min(0).max(1e12),
   overdue_resend_days: z.coerce.number().int().min(1).max(365),
+  // per-rule automatic switches — these gate the SCHEDULED digest only
+  rule_overdue_enabled: z.coerce.boolean(),
+  rule_cheque_enabled: z.coerce.boolean(),
+  rule_dormant_enabled: z.coerce.boolean(),
+  rule_focus_enabled: z.coerce.boolean(),
   // phase 4 — SMTP
   smtp_host: z.string().trim().max(255),
   smtp_port: z.coerce.number().int().min(1).max(65535),

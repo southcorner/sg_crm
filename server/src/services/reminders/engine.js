@@ -52,6 +52,14 @@ const whatsapp = require('./whatsapp');
 // --- constants --------------------------------------------------------------
 
 const RULE = { DIGEST: 'digest', OVERDUE: 'overdue', CHEQUE: 'cheque', DORMANT: 'dormant', FOCUS: 'focus' };
+
+/**
+ * The four content rules, in digest order. Each can be switched out of the
+ * AUTOMATIC (cron / boot) path independently — `rule_<name>_enabled` — while
+ * staying available from the Reminders page. Switching a rule off is how the
+ * admin says "stop chasing this for now", not "delete the rule".
+ */
+const RULE_KEYS = [RULE.OVERDUE, RULE.CHEQUE, RULE.DORMANT, RULE.FOCUS];
 const STATUS = {
   PENDING: 'pending',
   SENT: 'sent',
@@ -134,8 +142,52 @@ function settingsSnapshot() {
     chequeLeadDays: chequeService.leadDays(),
     dormantMonths: dormantService.dormantMonths(),
     digestSendTime: String(config.getSetting('digest_send_time', '09:00')),
+    automaticRules: automaticRules(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// rule selection
+// ---------------------------------------------------------------------------
+
+/**
+ * Which rules the SCHEDULED digest is allowed to send. Manual runs ignore this
+ * — the whole point of switching a rule off is that a human can still fire it
+ * deliberately from the Reminders page.
+ */
+function automaticRules() {
+  return RULE_KEYS.filter((key) => Boolean(config.getSetting(`rule_${key}_enabled`, true)));
+}
+
+/** Normalise a caller's rule list: unknown names dropped, digest order kept. */
+function normalizeRules(rules) {
+  if (rules === undefined || rules === null) return [...RULE_KEYS];
+  const wanted = new Set((Array.isArray(rules) ? rules : [rules]).map((r) => String(r)));
+  return RULE_KEYS.filter((key) => wanted.has(key));
+}
+
+/**
+ * The dedupe identity of a digest: which rep, which day, which rules.
+ *
+ * Keying the per-rep/day guard on the RULE SET (rather than on "this rep is
+ * done today") is what lets a scheduled dormant+focus digest at 09:00 coexist
+ * with a manual cheque+overdue run at 15:00 — different rule sets, different
+ * guard rows, neither blocks the other. Re-running the SAME set on the same day
+ * is still refused, so crash-restart safety is preserved on every path,
+ * scheduled and manual alike (a "manual runs always bypass the guard" rule
+ * would have given that up).
+ */
+function rulesKey(rules) {
+  return [...rules].sort().join(',');
+}
+
+const ALL_RULES_KEY = rulesKey(RULE_KEYS);
+
+/** Empty rule results, so a rule that was not selected costs nothing to skip. */
+const NO_OVERDUE = { groups: [], suppressed: [], unrouted: 0, cutoff: null, resendOn: null, skipped: true };
+const NO_CHEQUE = { items: [], suppressed: [], unrouted: 0, leadDays: null, skipped: true };
+const NO_DORMANT = { eligible: [], suppressed: [], unrouted: 0, months: null, threshold: null, total: 0, skipped: true };
+const NO_FOCUS = { month: null, isMonday: false, included: new Map(), suppressed: [], unrouted: 0, skipped: true };
 
 // ---------------------------------------------------------------------------
 // reps
@@ -623,14 +675,17 @@ function renderHtml(digest) {
  * @param {string} [opts.rep]   restrict the result to one rep (preview UI)
  * @returns {{runDate, digests, settings, stats}}
  */
-function evaluate({ date, now = new Date(), rep: repFilter = null } = {}) {
+function evaluate({ date, now = new Date(), rep: repFilter = null, rules = null } = {}) {
   const runDate = date || todayIso(now);
   const settings = settingsSnapshot();
+  const activeRules = normalizeRules(rules);
+  const active = new Set(activeRules);
 
-  const overdue = overdueRule(runDate, settings);
-  const cheques = chequeRule(runDate, settings);
-  const dormant = dormantRule(runDate, settings);
-  const focus = focusRule(runDate);
+  // a rule that was not asked for is never even queried
+  const overdue = active.has(RULE.OVERDUE) ? overdueRule(runDate, settings) : NO_OVERDUE;
+  const cheques = active.has(RULE.CHEQUE) ? chequeRule(runDate, settings) : NO_CHEQUE;
+  const dormant = active.has(RULE.DORMANT) ? dormantRule(runDate, settings) : NO_DORMANT;
+  const focus = active.has(RULE.FOCUS) ? focusRule(runDate) : NO_FOCUS;
 
   const reps = digestReps().filter((r) => !repFilter || r.id === repFilter);
   const digests = [];
@@ -677,10 +732,13 @@ function evaluate({ date, now = new Date(), rep: repFilter = null } = {}) {
   return {
     runDate,
     settings,
+    rules: activeRules,
+    rulesKey: rulesKey(activeRules),
     digests,
     stats: {
       reps: reps.length,
       digests: digests.length,
+      rules: activeRules,
       overdue: {
         candidates: overdue.groups.length,
         suppressed: overdue.suppressed.length,
@@ -792,16 +850,25 @@ function updateLogStatus(id, status, detail) {
 }
 
 /** The crash-restart guard: any digest row for this rep+date means "done". */
-function digestAlreadyRun(runDate, repId) {
+/**
+ * Has this rep already had a digest for THIS rule set today?
+ *
+ * `entity_id` on a digest row carries the sorted rule set. Rows written before
+ * rule selection existed have NULL there and mean "all four", so a plain
+ * all-rules run still recognises them — otherwise the upgrade itself would
+ * double-send on its first day.
+ */
+function digestAlreadyRun(runDate, repId, key = ALL_RULES_KEY) {
   return Boolean(
     getDb()
       .prepare(
         `SELECT 1 AS hit FROM reminders_log
-          WHERE run_date = ? AND rule_type = 'digest' AND salesperson_id = ?
+          WHERE run_date = @run_date AND rule_type = 'digest' AND salesperson_id = @rep
             AND status <> 'skipped_dedupe'
+            AND (entity_id = @key OR (entity_id IS NULL AND @is_all = 1))
           LIMIT 1`
       )
-      .get(runDate, repId)
+      .get({ run_date: runDate, rep: repId, key, is_all: key === ALL_RULES_KEY ? 1 : 0 })
   );
 }
 
@@ -852,12 +919,34 @@ function defaultSenders() {
  * @param {object}   [opts.senders]  channel → async fn (injected by tests)
  * @param {string}   [opts.rep]      restrict to one rep
  */
-async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false, senders, rep = null } = {}) {
-  const evaluation = evaluate({ date, now, rep });
+async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false, senders, rep = null, rules = null } = {}) {
+  const activeRules = normalizeRules(rules);
+
+  // Every rule switched off: there is nothing to attempt, so nothing is
+  // recorded either — an empty run must not look like "the digest went out".
+  if (!activeRules.length) {
+    const runDate = date || todayIso(now);
+    logger.info({ runDate }, 'digest skipped — no rules selected');
+    return {
+      runDate,
+      settings: settingsSnapshot(),
+      rules: [],
+      rulesKey: '',
+      digests: [],
+      stats: { reps: 0, digests: 0, rules: [] },
+      dryRun: Boolean(dryRun),
+      channels: [],
+      results: [],
+      skipped: 'no rules selected',
+    };
+  }
+
+  const evaluation = evaluate({ date, now, rep, rules: activeRules });
   const { runDate } = evaluation;
+  const key = evaluation.rulesKey;
 
   if (dryRun) {
-    return { ...evaluation, dryRun: true, channels, results: evaluation.digests.map((d) => dryResult(d, channels)) };
+    return { ...evaluation, dryRun: true, channels, results: evaluation.digests.map((d) => dryResult(d, channels, key)) };
   }
 
   const registry = senders || defaultSenders();
@@ -867,15 +956,17 @@ async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false
   for (const digest of evaluation.digests) {
     const repId = digest.rep.id;
 
-    if (digestAlreadyRun(runDate, repId)) {
+    if (digestAlreadyRun(runDate, repId, key)) {
       insertLog({
         runDate,
         ruleType: RULE.DIGEST,
+        entityType: 'rules',
+        entityId: key,
         repId,
         status: STATUS.SKIPPED_DEDUPE,
-        detail: { reason: 'a digest was already recorded for this rep today', counts: digest.counts },
+        detail: { reason: `a ${key} digest was already recorded for this rep today`, rules: activeRules, counts: digest.counts },
       });
-      results.push({ rep: digest.rep, status: STATUS.SKIPPED_DEDUPE, channels: [], counts: digest.counts });
+      results.push({ rep: digest.rep, status: STATUS.SKIPPED_DEDUPE, channels: [], counts: digest.counts, rules: activeRules });
       continue;
     }
 
@@ -884,11 +975,13 @@ async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false
       insertLog({
         runDate,
         ruleType: RULE.DIGEST,
+        entityType: 'rules',
+        entityId: key,
         repId,
         status: STATUS.SKIPPED,
-        detail: { reason: 'no delivery channel enabled for this rep', counts: digest.counts },
+        detail: { reason: 'no delivery channel enabled for this rep', rules: activeRules, counts: digest.counts },
       });
-      results.push({ rep: digest.rep, status: STATUS.SKIPPED, channels: [], counts: digest.counts });
+      results.push({ rep: digest.rep, status: STATUS.SKIPPED, channels: [], counts: digest.counts, rules: activeRules });
       continue;
     }
 
@@ -897,10 +990,12 @@ async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false
     const digestRowId = insertLog({
       runDate,
       ruleType: RULE.DIGEST,
+      entityType: 'rules',
+      entityId: key,
       repId,
       channel: eligible.join(','),
       status: STATUS.PENDING,
-      detail: { counts: digest.counts, subject: digest.subject },
+      detail: { counts: digest.counts, subject: digest.subject, rules: activeRules },
     });
 
     const perChannel = [];
@@ -919,6 +1014,7 @@ async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false
     updateLogStatus(digestRowId, digestStatus, {
       counts: digest.counts,
       subject: digest.subject,
+      rules: activeRules,
       channels: perChannel.map((c) => ({ channel: c.channel, status: c.status, error: c.error || null })),
     });
 
@@ -947,12 +1043,14 @@ async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false
       channels: perChannel,
       counts: digest.counts,
       items: digest.items.length,
+      rules: activeRules,
     });
   }
 
   logger.info(
     {
       runDate,
+      rules: activeRules,
       digests: evaluation.digests.length,
       sent: results.filter((r) => r.status === STATUS.SENT).length,
       failed: results.filter((r) => r.status === STATUS.FAILED).length,
@@ -964,12 +1062,12 @@ async function run({ date, now = new Date(), channels = CHANNELS, dryRun = false
   return { ...evaluation, dryRun: false, channels: wanted, results };
 }
 
-function dryResult(digest, channels) {
+function dryResult(digest, channels, key = ALL_RULES_KEY) {
   const eligible = channels.filter((c) => digest.rep.channels.includes(c));
   return {
     rep: digest.rep,
     status: eligible.length ? 'would_send' : STATUS.SKIPPED,
-    wouldDedupe: digestAlreadyRun(digest.runDate, digest.rep.id),
+    wouldDedupe: digestAlreadyRun(digest.runDate, digest.rep.id, key),
     channels: eligible,
     counts: digest.counts,
     items: digest.items.length,
@@ -1117,8 +1215,13 @@ function digestStatus({ now = new Date(), date = null } = {}) {
 
 module.exports = {
   RULE,
+  RULE_KEYS,
+  ALL_RULES_KEY,
   STATUS,
   CHANNELS,
+  automaticRules,
+  normalizeRules,
+  rulesKey,
   DORMANT_MAX_PER_DIGEST,
   DORMANT_SUPPRESS_DAYS,
   addDays,
